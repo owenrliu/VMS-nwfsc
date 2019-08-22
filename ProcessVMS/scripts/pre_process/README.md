@@ -1,8 +1,5 @@
 ### Pre-Processing Scripts
 
-![img-preprocess-workflow](https://github.com/mfisher5/VMS-nwfsc/blob/master/ProcessVMS/methods/preprocess_scripts_workflow.png?raw=true)
-<br>
-
 <br>
 <br>
 **When this repo was initiated, the scripts uploaded were the following versions:**

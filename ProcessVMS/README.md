@@ -4,15 +4,6 @@
 There are three subprojects in processing VMS data: pre-processing PacFIN fish tickets and VMS data, matching VMS to fish tickets, and interpolation of missing VMS data.
 <br>
 
-### Current Workflow with Scripts:
-![img-preprocess-workflow](https://github.com/mfisher5/VMS-nwfsc/blob/master/ProcessVMS/methods/preprocess_scripts_workflow.png?raw=true)
-![img-match-workflow](https://github.com/mfisher5/VMS-nwfsc/blob/master/ProcessVMS/methods/match_vms_tix_flowchart.png?raw=true)
-![img-regularize-workflow](https://github.com/mfisher5/VMS-nwfsc/blob/master/ProcessVMS/methods/regularize_scripts_workflow.png?raw=true)
-
-
-
-
-
 
 
 ### Directory Structure
