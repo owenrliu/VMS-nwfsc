@@ -1,6 +1,6 @@
 ### Pre-Processing Scripts
 
-![img-preprocess-workflow](https://github.com/mfisher5/VMS-repo/blob/master/ProcessVMS/methods/preprocess_scripts_workflow.png?raw=true)
+![img-preprocess-workflow](https://github.com/mfisher5/VMS-nwfsc/blob/master/ProcessVMS/methods/preprocess_scripts_workflow.png?raw=true)
 <br>
 
 <br>

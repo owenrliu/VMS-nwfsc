@@ -1,6 +1,6 @@
 ## Scripts: Match VMS Records to Trips in PacFIN Fish Tickets
 
-![img-match-workflow](https://github.com/mfisher5/VMS-repo/blob/master/ProcessVMS/methods/match_scripts_workflow.png?raw=true)
+![img-match-workflow](https://github.com/mfisher5/VMS-nwfsc/blob/master/ProcessVMS/methods/match_scripts_workflow.png?raw=true)
 <br>
 <br>
 
