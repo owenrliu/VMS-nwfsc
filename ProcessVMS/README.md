@@ -6,7 +6,7 @@ There are three subprojects in processing VMS data: pre-processing PacFIN fish t
 
 ### Current Workflow with Scripts:
 ![img-preprocess-workflow](https://github.com/mfisher5/VMS-nwfsc/blob/master/ProcessVMS/methods/preprocess_scripts_workflow.png?raw=true)
-![img-match-workflow](https://github.com/mfisher5/VMS-nwfsc/blob/master/ProcessVMS/methods/match_scripts_workflow.png?raw=true)
+![img-match-workflow](https://github.com/mfisher5/VMS-nwfsc/blob/master/ProcessVMS/methods/match_vms_tix_flowchart.png?raw=true)
 ![img-regularize-workflow](https://github.com/mfisher5/VMS-nwfsc/blob/master/ProcessVMS/methods/regularize_scripts_workflow.png?raw=true)
 
 
