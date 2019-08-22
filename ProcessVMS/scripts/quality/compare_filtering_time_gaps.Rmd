@@ -1,0 +1,348 @@
+---
+title: "Compare Filtered v. UnFiltered VMS"
+output: html_document
+---
+
+
+In an effort to understand which VMS records were added into the data set by using the unfiltered VMS data, I'm comparing the new unfiltered data with the filtered data
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "D:/VMS-repo") 
+```
+Clear workspace
+```{r}
+rm(list=ls())
+```
+
+```{r}
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+```
+<br>
+
+
+
+### Read in
+unfiltered data
+```{r}
+mydat <- read.csv("ProcessVMS/R_Output/match/unfiltered/cleaned/VMS_Outputs_wTARGET_10d_lookback_2010_cleaned.csv")
+```
+
+ArcGIS filtered data
+```{r}
+mydat_gisfilter <- read.csv("../VMS_RAship/R_Output/FishTix_VMS_Match_v2/cleaned/VMS_Outputs_wTARGET_10d_lookback_2010_cleaned.csv")
+```
+
+R-filtered
+```{r}
+dcrb_rfilter <- read.csv("ProcessVMS/R_Output/match/unfiltered/cleaned/DCRB_VMS_Outputs_wTARGET_10d_lookback_2010_tripedge_inport_rm.csv")
+```
+<br>
+
+ltraj
+```{r}
+vms_ltraj <- read.csv("ProcessVMS/R_Output/interpolation/ltraj_VMS2010_LAT_CA_targetDCRB_inseason_SeasonWeek_all_perTrip.csv")
+```
+
+
+ArcGIS filtered ltraj
+```{r}
+getwd()
+ltraj_gisfilter <- read.csv("ProcessVMS/R_Output/interpolation/ltraj_VMS2010_LAT_filtered_CA_targetDCRB_inseason_SeasonWeek_all_perTrip.csv")
+```
+
+Fish ticket data 
+```{r}
+fishtix <- read.csv("../VMS_RAship/R_Output/FishTix_VMS_Match_v2/unfiltered/FishTix_wVMS_10d_lookback_2010.csv")
+```
+<br>
+
+
+## Prepare the `ltraj` object for the new R filtered data
+
+Match vessel lengths / agency code to VMS records
+```{r join_raw}
+dcrb_rfilter$DOCNUM <- as.character(dcrb_rfilter$DOCNUM)
+fishtix$drvid <- as.character(fishtix$drvid)
+vms_w_landings <- left_join(dcrb_rfilter, fishtix, by=c("Rec_ID" = "Rec_ID", "DOCNUM" = "drvid"))
+```
+```{r thin_vms}
+cols_to_keep <- c("Rec_ID","UTCDATETIM", "LATITUDE", "LONGITUDE", "AVG_SPEED", "AVG_COURSE", "DOCNUM", "DECLARATIO", "NGDC_M", "X_COORD", "Y_COORD", "VMS_RECNO", 
+                  "westcoastdate", "date","Week", "year_Wk", "year",
+                  "TARGET_max", "Port_Of_Landing", "port_group_code",
+                  "VMS_lookback_pres",
+                  "agency_code","FINAL_LENGTH", "HISTORIC_DATA")
+vms_w_landings_thin <- select(vms_w_landings, cols_to_keep)
+```
+<br>
+
+
+Add in vessel category, season, and period columns
+```{r mutate_size_season}
+vmsdat2 <- vms_w_landings_thin %>%
+  mutate(vessel_cat = ifelse(FINAL_LENGTH > 40, "Large", "Small")) %>%
+  mutate(season = ifelse((year == 2009 & Week < 46), "08-09",
+                         ifelse((year==2009 & Week > 45) | (year==2010 & Week < 46), "09-10", 
+                            ifelse((year==2010 & Week > 45) | (year==2011 & Week < 46), "10-11",
+                                  ifelse((year==2011 & Week > 45) | (year==2012 & Week < 46), "11-12",
+                                         ifelse((year==2012 & Week > 45) | (year==2013 & Week < 46), "12-13",
+                                                ifelse((year==2013 & Week > 45) | (year==2014 & Week < 46), "13-14",
+                                                       ifelse((year==2014 & Week > 45) | (year==2015 & Week < 46), "14-15",
+                                                              ifelse((year==2015 & Week > 45) | (year==2016 & Week < 46), "15-16",
+                                                                     ifelse((year==2016 & Week > 45) | (year==2017 & Week < 46), "16-17",NA)))))))))) %>%
+  mutate(period = ifelse(season == "15-16", "A1",
+                         ifelse(season == "16-17", "A2", "Before")))
+```
+<br>
+
+
+Ensure that R recognises the timestamp as a POSIXct class
+```{r}
+vmsdat2$westcoastdate <- ymd_hms(vmsdat2$westcoastdate, tz= "America/Los_Angeles")
+class(vmsdat2$westcoastdate)
+```
+<br>
+
+
+Remove all rows where "VMS_lookback_pres" is recorded as "Duplicated". *These Rec_IDs will be duplicates, so will return an error when creating an ltraj object*.
+```{r}
+dim(vmsdat2)
+vmsdat2_nodup1 <- filter(vmsdat2, VMS_lookback_pres != "Duplicated")
+dim(vmsdat2_nodup1)
+cat("Proportion of VMS records removed due to duplicated fish tickets:", 1-dim(vmsdat2_nodup1)[1]/dim(vmsdat2)[1])
+```
+<br>
+
+Ensure that there are no more duplicated dates under the same Rec_ID
+```{r}
+dim(vmsdat2_nodup1)
+vmsdat2_nodup <- vmsdat2_nodup1[!duplicated(vmsdat2_nodup1[,c("Rec_ID","westcoastdate", "UTCDATETIM")]),]
+dim(vmsdat2_nodup)
+
+cat("Proportion of VMS records removed for being true duplicate records:", 1-dim(vmsdat2_nodup)[1]/dim(vmsdat2_nodup1)[1])
+```
+<br>
+Load package (note-loading package in the beginning of the script will mask "id" variable from dplyr.)
+```{r}
+library(adehabitatLT)
+library(dplyr)
+```
+
+```{r}
+vmsdat2_nodup$DECLARATIO[vmsdat2_nodup$DECLARATIO == "N/A"] <- NA
+```
+
+
+
+```{r}
+ltraj_dcrb_rfilter <- adehabitatLT::as.ltraj(xy=vmsdat2_nodup[,c("X_COORD","Y_COORD")], 
+                date=vmsdat2_nodup$westcoastdate, 
+                id=vmsdat2_nodup$Rec_ID,
+                infolocs = vmsdat2_nodup[,c("DOCNUM","vessel_cat",
+                                                         "port_group_code", "date",
+                                                         "season", "period")])
+```
+
+Turn back into a data frame
+```{r}
+ltraj_dcrb_rfilter <- ld(ltraj_dcrb_rfilter)
+```
+
+
+## Compare number of VMS records per trip
+
+#### Over All Records
+
+First, find number of vms records per trip
+```{r}
+records_unfiltered <- mydat %>%
+  group_by(Rec_ID) %>%
+  summarise(n_records = length(unique(VMS_RECNO))) %>%
+  mutate(type="unfiltered")
+records_gisfiltered <- mydat_gisfilter %>%
+  group_by(Rec_ID) %>%
+  summarise(n_records = length(unique(VMS_RECNO))) %>%
+  mutate(type="GIS filtered")
+
+records <- rbind(records_unfiltered, records_gisfiltered)
+```
+
+Compare histograms
+```{r}
+ggplot(records, aes(x=n_records, fill=type)) +
+  geom_histogram() +
+  facet_wrap(~type) +
+  ggtitle("All Trips") +
+  xlab("VMS Records per Trip") +
+  ylab("Number of Trips")
+```
+
+
+
+#### Dungeness crab trips
+
+First, find number of vms records per trip
+```{r}
+records_unfiltered <- mydat %>%
+  filter(TARGET_max=="DCRB") %>%
+  group_by(Rec_ID) %>%
+  summarise(n_records = length(unique(VMS_RECNO))) %>%
+  mutate(type="unfiltered")
+records_gisfiltered <- mydat_gisfilter %>%
+  filter(TARGET_max=="DCRB") %>%
+  group_by(Rec_ID) %>%
+  summarise(n_records = length(unique(VMS_RECNO))) %>%
+  mutate(type="GIS filtered")
+records_rfiltered <- dcrb_rfilter %>%
+  group_by(Rec_ID) %>%
+  summarise(n_records = length(unique(VMS_RECNO))) %>%
+  mutate(type="R filtered")
+
+records <- rbind(records_unfiltered, records_gisfiltered, records_rfiltered)
+```
+
+Compare histograms
+```{r}
+ggplot(records, aes(x=n_records, fill=type)) +
+  geom_histogram() +
+  facet_wrap(~type) +
+  ggtitle("DCRB Trips") +
+  xlab("VMS Records per Trip") +
+  ylab("Number of Trips")
+```
+
+
+## Compare time gaps in single trip
+
+#### First, all trip gaps
+ltraj_gisfilter
+dcrb_ltraj_rfilter
+Compare histograms
+```{r}
+upper_lim <- c(2000, 4000, 2000, 6000, 1000, 2500, 50)
+i = 1
+for(p in unique(vms_ltraj$port_group_code)){
+  ltraj_p <- vms_ltraj %>%
+    filter(port_group_code == p) %>%
+    filter(!is.na(dt)) %>%
+    dplyr::select(id, dt) %>%
+    mutate(type="unfiltered")
+  ltraj_gisfilter_p <-  ltraj_gisfilter %>%
+    filter(port_group_code == p) %>%
+    filter(!is.na(dt)) %>%
+    dplyr::select(id, dt) %>%
+    mutate(type=" GIS filtered")
+  ltraj_rfilter_p <- ltraj_dcrb_rfilter %>%
+    filter(port_group_code == p) %>%
+    filter(!is.na(dt)) %>%
+    dplyr::select(id, dt) %>%
+    mutate(type=" R filtered")
+  ltraj_p <- rbind(ltraj_p, ltraj_gisfilter_p, ltraj_rfilter_p)
+  myplot <- ggplot(ltraj_p, aes(x=dt/60)) +
+    geom_histogram(binwidth=12) + 
+    facet_wrap(~type) +
+    ggtitle(paste0("Port Group: ", p)) +
+    xlab("Time Between VMS Records (min)") +
+    ylim(c(0,upper_lim[i]))
+  print(myplot)
+  i = i + 1
+}
+```
+
+Compare boxplots to see outliers
+```{r}
+for(p in unique(vms_ltraj$port_group_code)){
+  ltraj_p <- vms_ltraj %>%
+    filter(port_group_code == p) %>%
+    filter(!is.na(dt)) %>%
+    dplyr::select(id, dt) %>%
+    mutate(type="unfiltered")
+  ltraj_gisfilter_p <-  ltraj_gisfilter %>%
+    filter(port_group_code == p) %>%
+    filter(!is.na(dt)) %>%
+    dplyr::select(id, dt) %>%
+    mutate(type=" GIS filtered")
+  ltraj_rfilter_p <- ltraj_dcrb_rfilter %>%
+    filter(port_group_code == p) %>%
+    filter(!is.na(dt)) %>%
+    dplyr::select(id, dt) %>%
+    mutate(type=" R filtered")
+  ltraj_p <- rbind(ltraj_p, ltraj_gisfilter_p, ltraj_rfilter_p)
+  myplot <- ggplot(ltraj_p, aes(x=type, y=dt/3600)) +
+    geom_boxplot() + 
+    ggtitle(paste0("Port Group: ", p)) +
+    ylab("Time between VMS Records (hours)")
+  print(myplot)
+}
+```
+
+  ltraj_p <- vms_ltraj %>%
+    filter(port_group_code == p) %>%
+    filter(!is.na(dt)) %>%
+    dplyr::select(id, dt) %>%
+    mutate(type="unfiltered")
+  ltraj_gisfilter_p <-  ltraj_gisfilter %>%
+    filter(port_group_code == p) %>%
+    filter(!is.na(dt)) %>%
+    dplyr::select(id, dt) %>%
+    mutate(type=" GIS filtered")
+  ltraj_rfilter_p <- ltraj_dcrb_rfilter %>%
+    filter(port_group_code == p) %>%
+    filter(!is.na(dt)) %>%
+    dplyr::select(id, dt) %>%
+    mutate(type=" R filtered")
+  ltraj_p <- rbind(ltraj_p, ltraj_gisfilter_p, ltraj_rfilter_p)
+
+#### Just Max trip gaps
+
+Find the maximum dt between VMS points
+```{r}
+vms_ltraj$id <- as.character(vms_ltraj$id)
+tripdat <- vms_ltraj %>%
+  group_by(id, port_group_code, period) %>%
+  summarise(max_dt = max(dt, na.rm=TRUE)/3600) %>%
+  mutate(type = "unfiltered")
+ltraj_gisfilter$id <- as.character(ltraj_gisfilter$id)
+tripdat_gisfilter <- ltraj_gisfilter %>%
+  group_by(id, port_group_code, period) %>%
+  summarise(max_dt = max(dt, na.rm=TRUE)/3600) %>%
+  mutate(type = "GIS filtered")
+ltraj_dcrb_rfilter$id <- as.character(ltraj_dcrb_rfilter$id)
+tripdat_rfilter <- ltraj_dcrb_rfilter %>%
+  group_by(id, port_group_code, period) %>%
+  summarise(max_dt = max(dt, na.rm=TRUE)/3600) %>%
+  mutate(type = "R filtered")
+
+tripdat <- rbind(tripdat, tripdat_gisfilter, tripdat_rfilter)
+head(tripdat)
+```
+
+Compare histograms
+```{r}
+for(p in unique(tripdat$port_group_code)){
+  tripdat_p <- filter(tripdat, port_group_code == p)
+  myplot <- ggplot(tripdat_p, aes(x=max_dt)) +
+    geom_histogram() + 
+    facet_wrap(~type) +
+    ggtitle(paste0("Port Group: ", p)) +
+    xlab("Max. dt")
+  print(myplot)
+}
+```
+zooming in to the 0-24 hr range:
+```{r}
+for(p in unique(tripdat$port_group_code)){
+  tripdat_p <- tripdat %>%
+    filter(port_group_code == p) %>%
+    filter(max_dt < 25)
+  myplot <- ggplot(tripdat_p, aes(x=max_dt)) +
+    geom_histogram() + 
+    facet_wrap(~type) +
+    ggtitle(paste0("Port Group: ", p)) +
+    xlab("Max. dt")
+  print(myplot)
+}
+```
+<br>
+

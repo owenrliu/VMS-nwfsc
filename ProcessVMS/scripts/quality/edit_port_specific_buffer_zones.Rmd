@@ -1,0 +1,268 @@
+---
+title: "COS Buffer Size"
+output: html_document
+---
+
+Some of the COS fishing trips appear to be getting removed even though the vessel is displaced from the port location. 
+
+<br>
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS-repo") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r include=FALSE}
+#install.packages("foreign")
+#install.packages("dplyr")
+#install.packages("tidyr")
+#install.packages("lubridate") #https://rstudio-pubs-static.s3.amazonaws.com/28038_1bcb9aa80ca84f27ace07d612872861a.html
+
+library(foreign)
+library(dplyr)
+library(tidyr)
+library(lubridate) 
+library(ggplot2)
+library(maps)
+library(rgdal)
+library(rgeos)
+```
+<br>
+
+Create Objects / Data Frames
+```{r}
+## directory where Blake's processed VMS data is stored as .dbf files
+origVMS_dir = "ProcessVMS/R_Output/match/unfiltered/v4/cleaned/"
+
+## file with port coordinates, including directory
+coords_file = "Input_Data/port_coords_fromBlake_edited.csv"
+
+## calendar years
+years <- c(2010)
+
+## width of buffer circle (in meters). applies to all ports but those that require smaller buffers
+r = 3000
+
+## port codes for any ports that require reduced buffer sizes. Default is only COS
+ports_lowbuffer <- c("COS")
+
+## width of buffer circle (in meters) for COS
+r2 = 1500
+```
+<br>
+
+### Read in the data
+
+First, the full vms data set
+```{r}
+vms <- read.csv(paste0(origVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_2010_cleaned.csv"))
+dim(vms)
+head(vms)
+dcrb_vms <- filter(vms, TARGET_max == "DCRB")
+```
+
+
+
+Then, the coordinates for the ports
+```{r}
+portdat <- read.csv(coords_file)
+if(any(is.na(portdat$lat))==TRUE){
+  message("WARNING: some ports are missing coordinates. ports were removed from data frame.")
+  portdat <- filter(portdat, !is.na(lat))
+}
+port_coords <- portdat
+port_coords_reg <- portdat %>% filter(!(port_code %in% ports_lowbuffer))
+port_coords_sm <- portdat %>% filter(port_code %in% ports_lowbuffer)
+```
+
+
+### Prep the port coordinates
+*Note - to assign a project, `proj4string` requires coordinates in xy (lng/lat) order*
+```{r}
+coordinates(port_coords_reg) <- c("Lon", "Lat") 
+proj4string(port_coords_reg) <- CRS("+init=epsg:4326") # WGS 84
+port_coords_reg_geo <- spTransform(port_coords_reg, CRSobj = CRS("+init=epsg:32610"))
+
+coordinates(port_coords_sm) <- c("Lon", "Lat") 
+proj4string(port_coords_sm) <- CRS("+init=epsg:4326") # WGS 84
+port_coords_sm_geo <- spTransform(port_coords_sm, CRSobj = CRS("+init=epsg:32610"))
+```
+<br>
+
+### Create buffer
+```{r}
+buffer_polygons_reg <- gBuffer(port_coords_reg_geo, byid=TRUE, width=r)
+buffer_polygons_sm <- gBuffer(port_coords_sm_geo, byid=TRUE, width=r2)
+buffer_polygons  <- rbind(buffer_polygons_reg, buffer_polygons_sm)
+```
+
+
+Get correct input format / coordinate system for ggplot
+```{r}
+ports_df <- data.frame(port_coords)
+buffer_polygons_LL <- spTransform(buffer_polygons, CRSobj = CRS("+init=epsg:4326"))
+plot(buffer_polygons_LL)
+```
+
+Basemap
+```{r}
+data(stateMapEnv)
+states_df <- map_data("state") %>%
+  filter(region == "california" | region=="oregon" | region=="washington")
+```
+
+
+Zoom in to a bay area and a coast area (*this is a crappy background map, so if ports are on land, that's ok.*)
+```{r}
+cutcoast <- list(c(-124, -124.7, 43.5, 43)) # OR [COS,GLD]
+```
+```{r}
+for(i in c(1)){
+  myplot <- ggplot() +
+    geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+    geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+    geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red", size=2) +
+    coord_cartesian(xlim=c(cutcoast[[i]][1], cutcoast[[i]][2]), ylim=c(cutcoast[[i]][3], cutcoast[[i]][4])) +
+    geom_text(data=ports_df, aes(x=Lon, y=Lat, label=port_code),size=4, nudge_x=-0.07)
+  print(myplot)
+}
+```
+<br>
+
+### Focus in on trips from ports with smaller buffer zones
+
+Focus in on trips leaving from COS
+```{r}
+dcrb_vms_sub <- filter(dcrb_vms, Port_Of_Landing %in% ports_lowbuffer)
+```
+
+
+
+
+### Re-filter VMS points
+Assign projection to VMS points
+```{r}
+dcrb_vms_sp <- dcrb_vms_sub
+coordinates(dcrb_vms_sp) <- c("LONGITUDE", "LATITUDE") 
+proj4string(dcrb_vms_sp) <- CRS("+init=epsg:4326") # WGS 84
+dcrb_vms_geo <- spTransform(dcrb_vms_sp, CRSobj = CRS("+init=epsg:32610"))
+```
+<br>
+
+
+Identify data points within buffer zones
+```{r}
+in.port <- over(dcrb_vms_geo, buffer_polygons)$port_code
+dcrb_vms_sub <- mutate(dcrb_vms_sub, in_port = in.port)
+```
+<br>
+
+Mark "remove" if the record is in port *and* the avg speed is < 0.05.
+```{r}
+dcrb_vms_sub <- mutate(dcrb_vms_sub, to_rm = ifelse(!is.na(in_port) & AVG_SPEED < 1, "remove", "retain"))
+cat("Proportion of VMS records removed: ", sum(dcrb_vms_sub$to_rm == "remove") / dim(dcrb_vms_sub)[1], "\n")
+cat("There were ", dim(dcrb_vms_sub)[1]/sum(dcrb_vms_sub$to_rm == "retain"), "x VMS records in the unfiltered data than will be retained.\n")
+cat("Proportion of VMS records marked in-port removed: ", sum(dcrb_vms_sub$to_rm == "remove") / sum(!is.na(dcrb_vms_sub$in_port)))
+```
+<br>
+
+Zoom into bay with VMS points for COS trips.
+```{r}
+for(i in c(1)){
+  myplot <- ggplot() +
+    geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+    geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+    geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red", size=2) +
+    geom_point(data=dcrb_vms_sub, aes(x=LONGITUDE, y=LATITUDE, col=to_rm), alpha=0.5) +
+    geom_text(data=ports_df, aes(x=Lon, y=Lat, label=port_code),size=4, nudge_x=0.07) +
+    coord_cartesian(xlim=c(cutcoast[[i]][1], cutcoast[[i]][2]), ylim=c(cutcoast[[i]][3], cutcoast[[i]][4]))
+  print(myplot)
+}
+```
+<br>
+
+What proportion of VMS records are being removed from COS trips, now that there is a reduced buffer zone size?
+```{r}
+premoved <- dcrb_vms_sub %>%
+  group_by(Rec_ID, Port_Of_Landing) %>%
+  summarise(p.remove = sum(to_rm=="remove") / n())
+cat("Removed more than 99% of records from ", sum(premoved$p.remove > 0.99) / length(premoved$p.remove) * 100, "% (" , sum(premoved$p.remove > 0.99) , "total) of trips. ")
+for(p in ports_lowbuffer){
+  tmp_dat <- filter(premoved, Port_Of_Landing == p)
+  myplot <- ggplot(premoved, aes(x=p.remove)) +
+    geom_histogram() +
+    ggtitle("Across All Ports") 
+  ggplot(data=premoved, aes(x=p.remove)) +
+    geom_histogram() +
+    xlab("Percent VMS records removed per trip") +
+    ggtitle(p)
+  print(myplot)
+}
+```
+<br>
+
+Look at full trip data for some trips which previously had 100% records removed.
+```{r}
+trips_to_keep <- c(449332172, 449331741, 449332171)
+for(id in trips_to_keep){
+  tmp_dat <- filter(dcrb_vms_sub, Rec_ID == id)
+  myplot <- ggplot(tmp_dat) +
+    geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+    geom_point(aes(x=LONGITUDE, y=LATITUDE, col=to_rm), size = 4, alpha = 0.5) + 
+    geom_path(aes(x=LONGITUDE, y=LATITUDE), col="dodgerblue4", size = 0.5, alpha = 0.5) +
+    geom_point(data=filter(ports_df, as.character(port_code) == as.character(unique(tmp_dat$Port_Of_Landing))), aes(x=Lon, y=Lat), col="red", size=2) +
+    #scale_color_continuous() +
+    ggtitle(paste0("Trip ID:", i, "Port:", tmp_dat$Port_Of_Landing[1])) +
+    coord_cartesian(xlim=c(min(tmp_dat$LONGITUDE) - 0.1, max(tmp_dat$LONGITUDE) + 0.1), ylim=c(min(tmp_dat$LATITUDE) - 0.1, max(tmp_dat$LATITUDE) + 0.1))
+  print(myplot)
+}
+```
+<br>
+
+
+Look at full trip data for a subset of 100 trips, COS port of landing. 
+```{r}
+trips_to_keep <- unique(dcrb_vms_sub$Rec_ID)[1:100]
+for(id in trips_to_keep){
+  tmp_dat <- filter(dcrb_vms_sub, Rec_ID == id)
+  myplot <- ggplot(tmp_dat) +
+    geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+    geom_point(aes(x=LONGITUDE, y=LATITUDE, col=to_rm), size = 4, alpha = 0.5) + 
+    geom_path(aes(x=LONGITUDE, y=LATITUDE), col="dodgerblue4", size = 0.5, alpha = 0.5) +
+    geom_point(data=filter(ports_df, as.character(port_code) == as.character(unique(tmp_dat$Port_Of_Landing))), aes(x=Lon, y=Lat), col="red", size=2) +
+    #scale_color_continuous() +
+    ggtitle(paste0("Trip ID:", i, "Port:", tmp_dat$Port_Of_Landing[1])) +
+    coord_cartesian(xlim=c(min(tmp_dat$LONGITUDE) - 0.1, max(tmp_dat$LONGITUDE) + 0.1), ylim=c(min(tmp_dat$LATITUDE) - 0.1, max(tmp_dat$LATITUDE) + 0.1))
+  print(myplot)
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

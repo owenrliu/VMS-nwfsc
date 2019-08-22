@@ -1,0 +1,220 @@
+---
+title: "Filter for Time Gaps in VMS Data"
+output: html_document
+---
+
+Last step before interpolation. Filters for time gaps over which it is unlikely that linear interpolation will be representative. According to the following rules:
+
+IF the maximum time gap is > 4 hours OR composes > 25% of the trip, Remove the trip. UNLESS...
+
+1. The maximum time gap occurs when the vessel is in port. <- Leave the trip
+<br>
+2. The maximum time gap is the second to last record. <- Write out the trip to another file for further examination.
+
+
+<br>
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS-repo") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r include=FALSE}
+library(dplyr)
+library(tidyr)
+library(lubridate) 
+library(ggplot2)
+library(move)
+```
+<br>
+
+Create Objects / Data Frames
+```{r}
+## directory where filtered VMS data is stored as .csv file
+VMS_dir = "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+
+## calendar years
+years <- c(2010)
+```
+<br>
+
+
+
+### Read in the data
+
+First, the full vms data set
+```{r rawdat}
+for(i in seq(1,length(years))){
+  y <- years[i]
+  if(i == 1){
+    vms <- read.csv(paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_speed_cleaned_offshore.csv"))
+  } else{
+    tmp_vms <-read.csv(paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_speed_cleaned_offshore.csv"))
+    vms <- rbind(vms, tmp_vms)
+  }
+}
+
+if("X" %in% colnames(vms)){
+  vms <- dplyr::select(vms, -X)
+}
+dim(vms)
+head(vms)
+```
+<br>
+
+
+### Calculate dt between records
+#### Ensure that R recognises the timestamp as a POSIXct class
+```{r}
+vms$westcoastdate <- ymd_hms(vms$westcoastdate, tz= "America/Los_Angeles")
+class(vms$westcoastdate)
+vms$UTCDATETIM <- ymd_hms(vms$UTCDATETIM, tz= "UTC")
+vms$DECLARATIO[vms$DECLARATIO == "N/A"] <- NA
+```
+<br>
+
+#### Order timestamps within each individual
+```{r}
+vms <- vms %>%
+  arrange(Rec_ID, UTCDATETIM)
+```
+<br>
+
+#### Create `move` object, with trip as "id"
+```{r}
+start.time <- Sys.time()
+movedat <- move(x=vms$LONGITUDE,
+                y=vms$LATITUDE,
+                time=vms$UTCDATETIM,
+                data=vms,
+                proj=sp::CRS("+init=epsg:4326"),
+                animal=vms$Rec_ID)
+Sys.time() - start.time
+```
+<br>
+
+Use `timeLag` to get the amount of time that has elapsed between each successive VMS record.
+```{r}
+timestep <- timeLag(movedat, units="secs")
+```
+<br>
+
+Add time lags back into move object
+```{r}
+movedat$timelag <- unlist(lapply(timestep, c, NA))
+```
+<br>
+
+Create a data frame; thin it out
+```{r}
+vmsdat_move <- as.data.frame(movedat)
+vmsdat_move <- vmsdat_move %>%
+  dplyr::select(c(Port_Of_Landing, Rec_ID, LATITUDE, LONGITUDE, westcoastdate, avg_speed_ms, in_port, timelag)) %>%
+  arrange(Rec_ID, westcoastdate)
+head(vmsdat_move)
+```
+<br>
+
+### Flag trips for removal
+
+Number records in order for each trip
+```{r}
+vmsdat_move <- vmsdat_move %>%
+  group_by(Rec_ID) %>%
+  mutate(trip_dt = sum(timelag, na.rm=TRUE), recnum = seq(1, length(LATITUDE)), max_recnum = max(recnum)) %>%
+  ungroup()
+```
+<br>
+
+Grab the record with the greatest time gap between records
+```{r}
+vmsdat_maxDT <- vmsdat_move %>%
+  group_by(Rec_ID) %>%
+  top_n(1, wt=timelag)
+```
+<br>
+
+Flag the trip if the timelag > 4 hours OR more than 25% total trip time
+```{r}
+vmsdat_maxDT <- vmsdat_maxDT %>%
+  mutate(remove_trip = ifelse(timelag > (4*3600) | (timelag/trip_dt) > 0.40, "remove", "retain"))
+
+n_remove = sum(vmsdat_maxDT$remove_trip == "remove")
+cat("Flagged ", n_remove/length(vmsdat_maxDT$remove_trip)*100, "% (", n_remove,") trips for removal.")
+
+cat(sum(vmsdat_maxDT$remove_trip == "remove" & !is.na(vmsdat_maxDT$in_port))/n_remove*100, "% removed trips were in-port timelags.")
+cat(sum(vmsdat_maxDT$remove_trip == "remove" & (vmsdat_maxDT$max_recnum-vmsdat_maxDT$recnum == 1))/n_remove*100, "% removed trips were the second to last record in the trip.")
+```
+<br>
+
+### Filter and write out data
+Trips to retain
+```{r}
+# trips to retain
+trips_retained <- vmsdat_maxDT %>%
+  filter(remove_trip == "retain" | remove_trip == "remove" & !is.na(in_port)) %>%
+  dplyr::select(Rec_ID)
+# get the VMS records for those trips
+vms_out <- vms %>%
+  filter(Rec_ID %in% trips_retained$Rec_ID) %>%
+  dplyr::select(-dt, -dist)
+# write out
+for(y in years){
+  tmp_out <- filter(vms_out, year(westcoastdate) == y)
+  write.csv(tmp_out, paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_final_cleaned.csv"), row.names=FALSE)
+}
+```
+<br>
+
+Trips to remove
+```{r}
+# trips to retain
+trips_removed <- vmsdat_maxDT %>%
+  filter(!(Rec_ID %in% trips_retained$Rec_ID) & ((max_recnum-recnum) != 1)) %>%
+  dplyr::select(Rec_ID)
+# get the VMS records for those trips
+vms_removed <- vms %>%
+  filter(Rec_ID %in% trips_removed$Rec_ID) %>%
+  dplyr::select(-dt, -dist)
+# write out
+for(y in years){
+  tmp_out <- filter(vms_removed, year(westcoastdate) == y)
+  write.csv(tmp_out, paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_timegaps_removed.csv"), row.names=FALSE)
+}
+```
+<br>
+
+Trips marked to remove, but for the second to last record in the trip
+```{r}
+# trips to retain
+trips_removed_tmp <- vmsdat_maxDT %>%
+  filter(!(Rec_ID %in% trips_retained$Rec_ID) & ((max_recnum-recnum) == 1)) %>%
+  dplyr::select(Rec_ID)
+# get the VMS records for those trips
+vms_removed_tmp <- vms %>%
+  filter(Rec_ID %in% trips_removed_tmp$Rec_ID) %>%
+  dplyr::select(-dt, -dist)
+# write out
+for(y in years){
+  tmp_out <- filter(vms_removed_tmp, year(westcoastdate) == y)
+  write.csv(tmp_out, paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_timegaps_removed_temp.csv"), row.names=FALSE)
+}
+```
+<br>
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,280 @@
+---
+title: "Edit new unfiltered VMS files from OLE"
+output: html_document
+---
+
+
+The input VMS file should be partially pre-processed (cleaned, condensed) using a python script. The following changes needed to be made for further processing:
+
+1. Add in Cartesian geocoordinates (after checking for missing lat/lon)
+
+2. Add in unique record numbers for each VMS record
+
+3. Remove VMS records outside of a given latitude (assumed to be non-West Coast)
+
+4. Add in the bathymetry layer
+
+5. Remove high elevation points
+
+6. Remove speed and course columns
+
+7. Reorder columns
+
+<br>
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "C:/Users/Mary.Fisher/Documents/VMS-repo")
+
+library(readr)
+library(foreign)
+library(lubridate)
+library(dplyr)
+library(rgdal)
+library(raster)
+library(rgeos)
+library(sp)
+library(maps)
+library(ggplot2)
+```
+
+
+Choose year and lat/lon bounds of VMS data points (currently set conservatively around US West Coast waters.)
+```{r}
+year = 2009
+lon_upper = NA #-128 # if you do not want this filter, set to NA
+lon_lower = NA #-115 # if you do not want this filter, set to NA
+lat_lower = 32 # if you do not want this filter, set to NA
+lat_upper = 51 # if you do not want this filter, set to NA
+bathy_upper = 100
+```
+<br>
+
+### Read in data
+```{r}
+mydat <- read_csv(paste0("Input_Data/fromOLE_cleaned/VMS_all_data_", year, ".csv"))
+#17559561 rows
+colnames(mydat)
+```
+<br>
+
+For some years, the declarations column has text instead of just a numerical code. If that's the case, you'll want to run the following code chunk so that read_csv doesn't throw errors. 
+```{r eval=FALSE}
+mydat <- read_csv(paste0("Input_Data/fromOLE_cleaned/VMS_all_data_", year, ".csv"),
+                  col_types=cols(
+                    UTCDATETIM = col_datetime(format = ""),
+                    LATITUDE = col_double(),
+                    LONGITUDE = col_double(),
+                    VESSEL_NAM = col_character(),
+                    AVG_SPEED = col_double(),
+                    AVG_COURSE = col_double(),
+                    DOCNUM = col_character(),
+                    DECLARATIO = col_character()
+                  ))
+#17559561 rows
+colnames(mydat)
+```
+<br>
+
+
+### Check for missing data
+Are any records missing lat/lon?
+```{r}
+missing_lat <- sum(is.na(mydat$LATITUDE)); missing_lat
+if(missing_lat > 0){
+  View(mydat %>% filter(is.na(LATITUDE)))
+}
+```
+<br>
+
+**AFTER CHECKING ORIGINAL OLE FILE**, delete the missing record.
+```{r}
+mydat <- filter(mydat, !is.na(LATITUDE))
+```
+<br>
+
+Some of the latitude measurements are listed as negatives (probably due to the parsing process); edit those to be all positive
+```{r}
+mydat <- mutate(mydat, LATITUDE = ifelse(LATITUDE > 0, LATITUDE, LATITUDE*-1))
+```
+<br>
+
+### Add in missing columns
+Convert lat/long to cartesian geocoordinates (conversion code from Briana; tested to ensure that GPS locations in 11N UTM zone will successfully convert to x/y despite 10N specification)
+```{r}
+# conversion
+mydat_xy <- mydat
+coordinates(mydat_xy) <- c("LONGITUDE", "LATITUDE")
+mydat_xy.spatial <- SpatialPoints(mydat_xy, proj4string=CRS("+proj=longlat +datum=WGS84"))
+mydat_xy.UTM <-spTransform(mydat_xy.spatial, CRS("+proj=utm +north +zone=10 +ellps=WGS84"))
+mydat_xy <- as.data.frame(mydat_xy.UTM); colnames(mydat_xy)<-c("X_COORD", "Y_COORD")
+head(mydat_xy)
+
+# add to data frame
+mydat <- mydat %>%
+  mutate(X_COORD = mydat_xy$X_COORD,
+         Y_COORD = mydat_xy$Y_COORD)
+
+# validate with back-conversion to lat/long
+test_coords <- mydat %>%
+  slice(1:20) %>%
+  dplyr::select(LONGITUDE, LATITUDE, X_COORD,Y_COORD)
+coordinates(test_coords) <- c("X_COORD", "Y_COORD")
+test_coords.spatial <- SpatialPoints(test_coords, proj4string=CRS("+proj=utm +north +zone=10 +ellps=WGS84"))
+test_coords.LL <-spTransform(test_coords.spatial, CRS("+proj=longlat +datum=WGS84"))
+test_coords.LL <- as.data.frame(test_coords.LL); colnames(test_coords.LL)<-c("LONGITUDE", "LATITUDE")
+head(test_coords.LL); head(as.data.frame(test_coords))
+```
+
+
+VMS_recno: select random integer values between X and Y, sampling without replacement. **CHECK PREVIOUS YEARS OF DATA TO MAKE SURE THERE ARE NO DUPLICATE RECORD NUMBERS**
+```{r}
+start = as.numeric(paste0(year, "0000001"))
+end = start + dim(mydat)[1]
+new_recnos <- sample(x=seq(start,end),size=dim(mydat)[1], replace=FALSE)
+#! note-- checked the new record numbers against all previous years of data. no duplicates.
+mydat[,"VMS_RECNO"] <- new_recnos
+```
+<br>
+
+### Remove records out of bounds
+This will delete records above the US-Canadian border (`lat_upper`) and below the US-Mexican border (`lat_lower`)
+```{r}
+dim(mydat)
+if(!is.na(lat_upper)){
+  mydat <- filter(mydat, LATITUDE < lat_upper)
+} 
+if(!is.na(lat_lower)){
+  mydat <- filter(mydat, LATITUDE > lat_lower)
+}
+dim(mydat)
+```
+<br>
+
+This will delete records far out to sea, or inland ( I don't currently use this. )
+```{r}
+dim(mydat)
+if(!is.na(lon_upper)){
+  mydat <- filter(mydat, LONGITUDE < lon_upper)
+} 
+if(!is.na(lon_lower)){
+  mydat <- filter(mydat, LONGITUDE > lon_lower)
+}
+dim(mydat)
+```
+<br>
+
+### Remove duplicates
+Duplicates are any VMS records with the same: UTCDATETIM, LATITUDE, LONGITUDE, VESSEL_NAM, DOCNUM
+
+Create data frame where duplicated record (second record) is removed.
+```{r without_duplicates}
+dim(mydat)
+mydat_nodup <- mydat[!duplicated(mydat[,c("UTCDATETIM","LATITUDE", "LONGITUDE", "VESSEL_NAM", "DOCNUM")]),]
+dim(mydat_nodup)
+
+cat("Proportion of VMS records removed for being true duplicate records:", 1-dim(mydat_nodup)[1]/dim(mydat)[1])
+```
+<br>
+
+Save the duplicate entries to a file, to understand what data is being removed!
+```{r save_duplicates}
+mydat_dup <- rbind(mydat[duplicated(mydat[,c("UTCDATETIM","LATITUDE", "LONGITUDE", "VESSEL_NAM", "DOCNUM")], fromLast = FALSE),],
+                       mydat[duplicated(mydat[,c("UTCDATETIM","LATITUDE", "LONGITUDE", "VESSEL_NAM", "DOCNUM")], fromLast = TRUE),])
+
+dim(mydat_dup)[1] / dim(mydat)[1]
+
+mydat_dup_sorted <- mydat_dup %>% arrange(DOCNUM, UTCDATETIM)
+write.csv(x=mydat_dup_sorted, paste0("Input_Data/fromOLE_cleaned/VMS_all_data_", year, "_duplicates.csv"))
+```
+<br>
+
+### Add the bathymetry layer
+
+Option 1: Read in the ASCII `raster` file produced from ArcGIS, and check the projection. It would be a lat/lon WGS84 projection. convert to SpatialGridDataFrame.
+*eval set to false*
+```{r eval=FALSE}
+bathy.raster <-raster("Input_Data/bathymetry/vms_composite_bath.txt")
+bathy.raster@crs
+#bathy.grid <- as(bathy.raster, 'SpatialGridDataFrame')
+#saveRDS(bathy.grid, file="Input_Data/bathymetry/vms_composite_bath_spGrid.RDS")
+```
+<br>
+
+Option 2: Read in the SpatialGridDataFrame object (created 3/29/2019 from raster file above)
+```{r}
+bathy.grid <- readRDS("Input_Data/bathymetry/vms_composite_bath_spGrid.RDS")
+```
+<br>
+
+Get bathymetry at VMS data points.
+```{r}
+# OPTION 1: USE WITH RASTER. Extract based on layer indices
+# mydat_nodup$NGDC_M <- sapply(1:nrow(mydat_nodup), function(i){raster::extract(bathy.raster, mydat_nodup[i,c("LONGITUDE","LATITUDE")], layer=mydat_nodup$layerindex[i], nl=1)})
+
+# OPTION 2: USE WITH SPATIAL DATA FRAME. apply 'over' function
+vms_sp <- mydat_nodup
+coordinates(vms_sp) <- c("LONGITUDE", "LATITUDE") 
+proj4string(vms_sp) <- CRS("+init=epsg:4326") # WGS 84
+crs(bathy.grid) <- CRS("+init=epsg:4326") # WGS 84
+bathy.points <- over(vms_sp, bathy.grid)$vms_composite_bath
+mydat_nodup <- mutate(mydat_nodup, NGDC_M = bathy.points)
+```
+<br>
+
+Plot points
+```{r plot_all}
+data(stateMapEnv)
+states_df <- map_data("state") %>%
+  filter(region == "california" | region=="oregon" | region=="washington")
+# all points
+ggplot() +
+  geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+  geom_point(data=mydat_nodup, aes(x=LONGITUDE, y=LATITUDE, col=NGDC_M)) +
+  coord_cartesian(xlim=c(-127, -114), ylim=c(32, 49))
+# all points except port locations
+ggplot() +
+  geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+  geom_point(data=filter(mydat_nodup, NGDC_M > -100000), aes(x=LONGITUDE, y=LATITUDE, col=NGDC_M)) +
+  coord_cartesian(xlim=c(-127, -114), ylim=c(32, 49))
+```
+<br>
+
+Remove high elevation bathymetry
+```{r}
+mydat_nodup <- filter(mydat_nodup, NGDC_M < bathy_upper)
+```
+<br>
+
+Re-plot.
+```{r plot_filtered}
+# all points except port locations
+ggplot() +
+  geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+  geom_point(data=filter(mydat_nodup, NGDC_M > -100000), aes(x=LONGITUDE, y=LATITUDE, col=NGDC_M)) +
+  coord_cartesian(xlim=c(-127, -114), ylim=c(32, 49))
+```
+<br>
+
+### Reorder columns
+```{r}
+mydat_ordered <- mydat_nodup[,c("UTCDATETIM", "LATITUDE", "LONGITUDE", "NGDC_M","VESSEL_NAM", "AVG_SPEED",
+                               "AVG_COURSE", "DOCNUM", "DECLARATIO", "X_COORD", "Y_COORD", "VMS_RECNO")]
+```
+
+### Write out new data as yearly .dbf files ####
+make UTC date/time a POSIXT object. Make sure that this parses correctly!
+```{r}
+mydat_ordered$UTCDATETIM <- as.character(mydat_ordered$UTCDATETIM)
+mydat_ordered$UTCDATETIM <- gsub("\\.", "-", mydat_ordered$UTCDATETIM) #without the '\\', '.' is code for all letters.
+mydat_ordered$UTCDATETIM <- parse_date_time(mydat_ordered$UTCDATETIM, orders=c("Ymd_HM"))
+head(mydat_ordered$UTCDATETIM)
+
+mydat_ordered$UTCDATETIM <- as.character(mydat_ordered$UTCDATETIM)
+```
+<br>
+
+Write it out as both a `.dbf` and a `.csv`
+```{r}
+mydat_ordered <- as.data.frame(mydat_ordered)
+write.dbf(dataframe=mydat_ordered, file=paste0("Input_Data/fromOLE_cleaned/bath_region_all_data_", year, "_edited.dbf"), factor2char=TRUE)
+write.csv(mydat_ordered, file=paste0("Input_Data/fromOLE_cleaned/bath_region_all_data_", year, "_edited.csv"), row.names=FALSE)
+```

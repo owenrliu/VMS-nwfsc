@@ -1,0 +1,171 @@
+---
+title: "Check 24HR Gap Outliers"
+output: html_document
+---
+
+
+
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS_RAship") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r}
+library(lubridate)
+library(ggmap)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+```
+
+
+<br>
+
+### Read in data
+
+`Ltraj` data frame
+```{r}
+vmsdat_ltraj <- read.csv("results/Participation_by_PortGroup/VMSdat_ltraj_2009-16_CA_targetDCRB_inseason_SeasonWeek_all_perTrip.csv")
+```
+```{r}
+colnames(vmsdat_ltraj)
+```
+```{r}
+colnames(vmsdat_ltraj)[which(colnames(vmsdat_ltraj)=="date.1")] <- "ticket.date"
+```
+<br>
+
+
+Then, the full vms data set
+```{r}
+years = seq(2009,2016)
+vms_out <- read.csv(paste0("R_Output/FishTix_VMS_Match_v2/cleaned_vms/VMS_Outputs_wTARGET_10d_lookback_",years[1],"_cleaned.csv"))
+
+if(length(years) > 1){
+  for(i in seq(2,length(years))){
+    vms_out_tmp <- read.csv(paste0("R_Output/FishTix_VMS_Match_v2/cleaned_vms/VMS_Outputs_wTARGET_10d_lookback_",years[i],"_cleaned.csv"))
+    vms_out <- rbind(vms_out, vms_out_tmp)
+  }
+}
+```
+```{r}
+dim(vms_out)
+```
+
+
+### Identify outliers based on 24hr gaps
+
+Find the maximum dt between VMS points
+```{r}
+tripdat <- vmsdat_ltraj %>%
+  group_by(id, port_group_code, period) %>%
+  summarise(max_dt = max(dt, na.rm=TRUE)/3600)
+head(tripdat)
+```
+
+
+```{r}
+tripdat_before <- tripdat %>%
+  filter(period == "Before") %>%
+  filter(!is.na(max_dt) & max_dt != 0) %>%
+  select(-period)
+tripdat_a1 <- tripdat %>%
+  filter(period == "A1") %>%
+  filter(!is.na(max_dt) & max_dt != 0) %>%
+  select(-period)
+```
+
+boxplots
+```{r}
+tripdat_before_melt <- melt(tripdat_before, id.vars = c("id", "port_group_code"), measure.vars = c("max_dt"))
+ggplot(tripdat_before_melt, aes(x=variable, y=value)) +
+  geom_boxplot() +
+  facet_wrap(~port_group_code) +
+  ylab("Maximum time diff. between VMS (hrs)")
+```
+
+
+```{r}
+tripdat_a1_melt <- melt(tripdat_a1, id.vars = c("id", "port_group_code"), measure.vars = c("max_dt"))
+ggplot(tripdat_a1_melt, aes(x=variable, y=value)) +
+  geom_boxplot() +
+  facet_wrap(~port_group_code) +
+  ylab("Maximum time diff. between VMS (hrs)")
+```
+
+
+
+
+
+### Identify dt > 24 hours
+
+
+Get the trip IDs for the outliers
+```{r}
+outliers_df <- tripdat_before %>%
+  filter(max_dt > 24)
+
+outliers_before <- left_join(outliers_df, vms_out, by=c("id"="Rec_ID"))
+```
+
+```{r}
+outliers_df <- tripdat_a1 %>%
+  filter(max_dt > 24)
+
+outliers_a1 <- left_join(outliers_df, vms_out, by=c("id"="Rec_ID"))
+```
+
+```{r}
+dim(outliers_a1 %>% select(id, port_group_code) %>% distinct()) #140
+dim(tripdat_a1%>% select(id, port_group_code) %>% distinct()) #1291
+dim(outliers_before %>%select(id, port_group_code) %>% distinct()) #1519
+dim(tripdat_before %>% select(id, port_group_code) %>% distinct()) #12707
+```
+
+### plot the trips with outliers
+
+```{r}
+library(maps)
+library(maptools)
+library(ggrepel)
+library(ggplot2)
+
+
+
+USA <- map_data("world") %>% 
+  filter(region=="USA")
+states <- map_data("state")
+west_coast <- subset(states, region %in% c("california", "oregon", "washington"))
+
+library(RColorBrewer)
+for(i in unique(outliers_a1$id)){
+  tmp_dat <- dplyr::filter(outliers_a1, id==i)
+  myplot <- ggplot() +
+    geom_polygon(data = states, aes(x=long, y = lat, fill=region, group=group), color=" grey37", alpha=0.3) +
+    guides(fill=FALSE)+
+    geom_point(data=tmp_dat, aes(x=LONGITUDE, y=LATITUDE, col=westcoastdate_notime), size = 2, alpha = 0.5) + 
+    scale_color_brewer(palette="Blues") +
+    ggtitle(paste0("Trip ID:", i)) +
+    coord_map(xlim= c(-115, -135),  ylim = c(30,45))
+  print(myplot)
+  png(paste0("Verify_Code/Filter_DistDur_Outliers/MaxDt_Outliers_A1_VMStracks_", i, ".png"))
+  print(myplot)
+  dev.off()
+}
+
+```
+
+
+
+
+
+

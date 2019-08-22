@@ -1,0 +1,265 @@
+---
+title: "Check Trip Distance, Duration Outliers"
+output: html_document
+---
+
+
+
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS_RAship") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r}
+library(lubridate)
+library(tidyr)
+library(purrr)
+library(ggmap)
+library(dplyr)
+library(ggplot2)
+```
+
+
+### Read in data
+
+`Ltraj` data frame
+```{r}
+vmsdat_ltraj <- read.csv("results/Participation_by_PortGroup/VMSdat_ltraj_2009-16_CA_targetDCRB_inseason_SeasonWeek_all_perTrip.csv")
+```
+```{r}
+colnames(vmsdat_ltraj)
+```
+```{r}
+colnames(vmsdat_ltraj)[which(colnames(vmsdat_ltraj)=="date.1")] <- "ticket.date"
+```
+<br>
+
+
+
+
+Then, the full vms data set
+```{r}
+years = seq(2009,2016)
+vms_out <- read.csv(paste0("R_Output/FishTix_VMS_Match_v2/cleaned_vms/VMS_Outputs_wTARGET_10d_lookback_",years[1],"_cleaned.csv"))
+
+if(length(years) > 1){
+  for(i in seq(2,length(years))){
+    vms_out_tmp <- read.csv(paste0("R_Output/FishTix_VMS_Match_v2/cleaned_vms/VMS_Outputs_wTARGET_10d_lookback_",years[i],"_cleaned.csv"))
+    vms_out <- rbind(vms_out, vms_out_tmp)
+  }
+}
+```
+```{r}
+dim(vms_out)
+head(vms_out)
+```
+
+
+
+
+### Identify outliers based on IQR, period + port group
+
+
+
+Tukey's method removes any observation outside of the IQR in a boxplot. 
+For this data, I want to remove outliers in trip distance and duration, for fish tickets landed at each port group and in each period
+
+
+First, summarise the trip data
+```{r}
+tripdat <- vmsdat_ltraj %>%
+  group_by(id, port_group_code, period) %>%
+  summarise(dist = sum(dist, na.rm=TRUE), duration = sum(dt, na.rm=TRUE)/3600)
+head(tripdat)
+```
+
+```{r}
+tripdat_before <- tripdat %>%
+  filter(period == "Before") %>%
+  filter(dist != 0) %>%
+  select(-period)
+tripdat_a1 <- tripdat %>%
+  filter(period == "A1") %>%
+  filter(dist != 0) %>%
+  select(-period)
+```
+
+boxplots
+```{r}
+tripdat_before_melt <- melt(tripdat_before, id.vars = c("id", "port_group_code"), measure.vars = c("dist", "duration"))
+ggplot(tripdat_before_melt, aes(x=variable, y=value)) +
+  geom_boxplot() +
+  facet_wrap(~port_group_code)
+```
+```{r}
+tripdat_a1_melt <- melt(tripdat_a1, id.vars = c("id", "port_group_code"), measure.vars = c("dist", "duration"))
+ggplot(tripdat_before_melt, aes(x=variable, y=value)) +
+  geom_boxplot() +
+  facet_wrap(~port_group_code)
+```
+
+
+
+Get the trip IDs for the outliers
+```{r}
+mydat <- tripdat_before
+
+dist_outliers_df <- data.frame(id = as.character(),
+                          tripdist = as.numeric())
+dur_outliers_df <- data.frame(id = as.character(),
+                          tripdur = as.numeric())
+for(p in unique(mydat$port_group_code)){
+  tmpdat <- filter(mydat, port_group_code == p)
+  dist_outliers <- boxplot.stats(tmpdat$dist, do.out=TRUE)$out  # outlier values.
+  duration_outliers <- boxplot.stats(tmpdat$duration, do.out=TRUE)$out  # outlier values.
+  ## get indices for outliers
+  dist_ids <- tmpdat$id[which(tmpdat$dist %in% dist_outliers)]
+  dur_ids <- tmpdat$id[which(tmpdat$duration %in% duration_outliers)]
+  ## append to data frames
+  tmp_dist <- data.frame(id=dist_ids,
+                         tripdist = dist_outliers)
+  tmp_duration <- data.frame(id = dur_ids,
+                             tripdur = duration_outliers)
+  dist_outliers_df <- rbind(dist_outliers_df, tmp_dist)
+  dur_outliers_df <- rbind(dur_outliers_df, tmp_duration)
+}
+
+dist_outliers_before <- left_join(dist_outliers_df, vms_out, by=c("id"="Rec_ID"))
+duration_outliers_before <- left_join(dur_outliers_df, vms_out, by=c("id"="Rec_ID"))
+```
+
+```{r}
+mydat <- tripdat_a1
+
+dist_outliers_df <- data.frame(id = as.character(),
+                          tripdist = as.numeric())
+dur_outliers_df <- data.frame(id = as.character(),
+                          tripdur = as.numeric())
+for(p in unique(mydat$port_group_code)){
+  tmpdat <- filter(mydat, port_group_code == p)
+  dist_outliers <- boxplot.stats(tmpdat$dist, do.out=TRUE)$out  # outlier values.
+  duration_outliers <- boxplot.stats(tmpdat$duration, do.out=TRUE)$out  # outlier values.
+  ## get indices for outliers
+  dist_ids <- tmpdat$id[which(tmpdat$dist %in% dist_outliers)]
+  dur_ids <- tmpdat$id[which(tmpdat$duration %in% duration_outliers)]
+  ## append to data frames
+  tmp_dist <- data.frame(id=dist_ids,
+                         tripdist = dist_outliers)
+  tmp_duration <- data.frame(id = dur_ids,
+                             tripdur = duration_outliers)
+  dist_outliers_df <- rbind(dist_outliers_df, tmp_dist)
+  dur_outliers_df <- rbind(dur_outliers_df, tmp_duration)
+}
+
+dist_outliers_a1 <- left_join(dist_outliers_df, vms_out, by=c("id"="Rec_ID"))
+duration_outliers_a1 <- left_join(dur_outliers_df, vms_out, by=c("id"="Rec_ID"))
+```
+
+
+
+
+### plot the trips with outliers
+
+```{r}
+library(maps)
+library(maptools)
+library(ggrepel)
+library(ggplot2)
+
+
+
+USA <- map_data("world") %>% 
+  filter(region=="USA")
+states <- map_data("state")
+west_coast <- subset(states, region %in% c("california", "oregon", "washington"))
+
+library(RColorBrewer)
+for(i in unique(dist_outliers_a1$id)){
+  tmp_dat <- dplyr::filter(dist_outliers_a1, id==i)
+  myplot <- ggplot() +
+    geom_polygon(data = states, aes(x=long, y = lat, fill=region, group=group), color=" grey37", alpha=0.3) +
+    guides(fill=FALSE)+
+    geom_point(data=tmp_dat, aes(x=LONGITUDE, y=LATITUDE, col=westcoastdate_notime), size = 2, alpha = 0.5) + 
+    scale_color_brewer(palette="Blues") +
+    ggtitle(paste0("Trip ID:", id)) +
+    coord_map(xlim= c(-115, -135),  ylim = c(30,45))
+  print(myplot)
+  png(paste0("Verify_Code/Filter_DistDur_Outliers/Dist_Outliers_VMStracks_", i, ".png"))
+  print(myplot)
+  dev.off()
+}
+
+```
+
+
+
+
+### Identify outliers based on IQR, period
+
+Get the trip IDs for the outliers
+```{r}
+mydat <- tripdat_before
+
+dist_outliers_df <- data.frame(id = as.character(),
+                          tripdist = as.numeric())
+dur_outliers_df <- data.frame(id = as.character(),
+                              tripdur = as.numeric())
+dist_outliers <- boxplot.stats(mydat$dist, do.out=TRUE)$out  # outlier values.
+duration_outliers <- boxplot.stats(mydat$duration, do.out=TRUE)$out  # outlier values.
+## get indices for outliers
+dist_ids <- mydat$id[which(mydat$dist %in% dist_outliers)]
+dur_ids <- mydat$id[which(mydat$duration %in% duration_outliers)]
+## append to data frames
+tmp_dist <- data.frame(id=dist_ids,
+                       tripdist = dist_outliers)
+tmp_duration <- data.frame(id = dur_ids,
+                           tripdur = duration_outliers)
+
+dist_outliers_before <- left_join(tmp_dist, vms_out, by=c("id"="Rec_ID"))
+duration_outliers_before <- left_join(tmp_duration, vms_out, by=c("id"="Rec_ID"))
+```
+
+### plot the trips with outliers
+
+```{r}
+library(maps)
+library(maptools)
+library(ggrepel)
+library(ggplot2)
+
+
+
+USA <- map_data("world") %>% 
+  filter(region=="USA")
+states <- map_data("state")
+west_coast <- subset(states, region %in% c("california", "oregon", "washington"))
+
+library(RColorBrewer)
+for(i in unique(dist_outliers_before$id)){
+  tmp_dat <- dplyr::filter(dist_outliers_before, id==i)
+  myplot <- ggplot() +
+    geom_polygon(data = states, aes(x=long, y = lat, fill=region, group=group), color=" grey37", alpha=0.3) +
+    guides(fill=FALSE)+
+    geom_point(data=tmp_dat, aes(x=LONGITUDE, y=LATITUDE, col=westcoastdate_notime), size = 2, alpha = 0.5) + 
+    scale_color_brewer(palette="Blues") +
+    ggtitle(paste0("Trip ID:", id)) +
+    coord_map(xlim= c(-115, -125),  ylim = c(30,45))
+  print(myplot)
+  png(paste0("Verify_Code/Filter_DistDur_Outliers/Dist_Outliers_VMStracks_", i, ".png"))
+  print(myplot)
+  dev.off()
+}
+
+```
+
+
+

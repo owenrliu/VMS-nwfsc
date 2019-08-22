@@ -1,0 +1,549 @@
+---
+title: "Prep Data Frames, LTRAJ for Vessel Length Ratios"
+output: html_document
+---
+
+This document takes the output from the VMS / Fish Ticket Matching script (v2) and creates (1) a data frame, and (2) an `ltraj` object, for use in calculating port group ratios of Lg:Sm vessel VMS metrics. 
+
+This version of the script calculates "season_week" three different ways: from the official start date of the season, from the first fish ticket landed on the coast, and from the first fish ticket landed at that port.
+
+
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "E:/VMS-repo") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r}
+library(lubridate)
+library(ggmap)
+library(dplyr)
+library(ggplot2)
+```
+
+Input variables
+```{r}
+vmsdir <- "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+fishtixdir <- "ProcessVMS/R_Output/match/unfiltered/"
+years <- c(2010)
+seasons <- c("09-10", "10-11")
+size_cutoff <- 40
+states <- c("C")
+targets <- c("DCRB")
+```
+<br>
+
+
+### Read in data
+First, the cleaned VMS data
+```{r}
+vmsdat <- read.csv(paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", years[1],"_cleaned.csv"))
+vmsdat$westcoastdate_notime <- date(parse_date_time(vmsdat$westcoastdate_notime, orders=c("Ymd", "mdY")))
+```
+<br>
+
+Then the associated fish ticket data
+```{r}
+fishtix <- read.csv(paste0(fishtixdir,"FishTix_wVMS_10d_lookback_",years[1],".csv"))
+fishtix$date <- date(parse_date_time(fishtix$date, orders=c("Ymd", "mdY")))
+
+if(length(years) > 1){
+  for(i in seq(2,length(years))){
+    fishtix_tmp <- read.csv(paste0(fishtixdir,"FishTix_wVMS_10d_lookback_",years[i],".csv"))
+    fishtix_tmp$date <- date(parse_date_time(fishtix_tmp$date, orders=c("Ymd", "mdY")))
+    fishtix <- rbind(fishtix, fishtix_tmp)
+  }
+}
+```
+<br>
+
+
+
+### Prep VMS data
+
+Match vessel lengths / agency code to VMS records
+```{r join_raw}
+vmsdat$DOCNUM <- as.character(vmsdat$DOCNUM)
+fishtix$drvid <- as.character(fishtix$drvid)
+vms_w_landings <- left_join(vmsdat, fishtix, by=c("Rec_ID" = "Rec_ID", "DOCNUM" = "drvid"))
+```
+```{r thin_vms}
+cols_to_keep <- c("Rec_ID","UTCDATETIM", "LATITUDE", "LONGITUDE", "AVG_SPEED", "AVG_COURSE", "DOCNUM", "DECLARATIO", "NGDC_M", "X_COORD", "Y_COORD", "VMS_RECNO", 
+                  "westcoastdate", "date","Week", "year_Wk", "year",
+                  "TARGET_max", "Port_Of_Landing", "port_group_code",
+                  "VMS_lookback_pres",
+                  "agency_code","FINAL_LENGTH", "HISTORIC_DATA")
+vms_w_landings_thin <- select(vms_w_landings, cols_to_keep)
+```
+<br>
+
+#### Filter for only those fish tickets from the state(s) and with the target species that you want to look at
+```{r}
+vms_w_landings_thin_filtered <- filter(vms_w_landings_thin, agency_code %in% states & TARGET_max %in% targets)
+```
+```{r}
+unique(vms_w_landings_thin_filtered$agency_code)
+unique(vms_w_landings_thin_filtered$TARGET_max)
+```
+<br>
+
+Add in vessel category, season, and period columns
+```{r mutate_size_season}
+vmsdat2 <- vms_w_landings_thin_filtered %>%
+  mutate(vessel_cat = ifelse(FINAL_LENGTH > size_cutoff, "Large", "Small")) %>%
+  mutate(season = ifelse((year == 2009 & Week < 46), "08-09",
+                         ifelse((year==2009 & Week > 45) | (year==2010 & Week < 46), "09-10", 
+                            ifelse((year==2010 & Week > 45) | (year==2011 & Week < 46), "10-11",
+                                  ifelse((year==2011 & Week > 45) | (year==2012 & Week < 46), "11-12",
+                                         ifelse((year==2012 & Week > 45) | (year==2013 & Week < 46), "12-13",
+                                                ifelse((year==2013 & Week > 45) | (year==2014 & Week < 46), "13-14",
+                                                       ifelse((year==2014 & Week > 45) | (year==2015 & Week < 46), "14-15",
+                                                              ifelse((year==2015 & Week > 45) | (year==2016 & Week < 46), "15-16",
+                                                                     ifelse((year==2016 & Week > 45) | (year==2017 & Week < 46), "16-17",NA)))))))))) %>%
+  mutate(period = ifelse(season == "15-16", "A1",
+                         ifelse(season == "16-17", "A2", "Before")))
+```
+<br>
+
+#### Filter for fish tickets filled out within the season start/end dates
+
+function to determine whether a given fish ticket was recorded in or outside of CA DCRB fishing seasons.
+```{r}
+within_season <- function(mydates, port_groups){
+  output_vec <- c()
+  groupA <- c("CCA", "ERA", "BGA")
+  groupB <- c("BDA", "SFA", "MNA", "MRA", "SBA", "SDA", "LAA")
+  for(i in seq(1, length(mydates))){
+    tmp_date <- mydates[i]
+    tmp_year <- year(tmp_date)
+    tmp_group <- port_groups[i]
+    if(month(tmp_date) < 8){
+      start_yr <- tmp_year - 1
+      end_yr <- tmp_year}
+    else{
+      start_yr <- tmp_year
+      end_yr <- tmp_year + 1
+    }
+    if(tmp_group %in% groupA){
+      start_date <- ymd(paste0(start_yr, "-12-01"))
+      end_date <- ymd(paste0(end_yr, "-07-15"))
+      if((start_date < tmp_date) == TRUE & (tmp_date < end_date) == TRUE){
+        output <- "Y"} else{ output <- "N"}
+    } else if(tmp_group %in% groupB){
+      start_date <- ymd(paste0(start_yr, "-11-15"))
+      end_date <- ymd(paste0(end_yr, "-06-30"))
+      if((start_date <= tmp_date) == TRUE & (tmp_date <= end_date) == TRUE){
+        output <- "Y"} else{ output <- "N"}
+    } else{
+      print("port group not recognized")
+      output <- NA
+    }
+    output_vec[i] <- output
+  }
+  return(output_vec)
+}
+```
+<br>
+
+Add a new column that says whether the VMS record is associated with a fish ticket that was within or outside of normal season dates
+```{r}
+vmsdat2 <- vmsdat2 %>%
+  mutate(in_season = ifelse(within_season(date, port_group_code) == "Y", "Yes", "No"))
+```
+<br>
+
+
+
+**Filter for desired seasons / records within season dates**
+```{r}
+vmsdat2_seasonFilter <- vmsdat2 %>%
+  filter(season %in% seasons) %>%
+  filter(in_season == "Yes") %>%
+  arrange(desc(westcoastdate))
+```
+```{r}
+dim(vmsdat2_seasonFilter)[1] / dim(vmsdat2)[1] 
+```
+<br>
+
+
+
+Get week of season, from official start date
+
+Function to calculate the week of the season, from first ticket across entire coast. 
+```{r}
+## get data frame of first fish ticket landed
+first_ticket_coast <- vmsdat2_seasonFilter %>%
+  group_by(season) %>%
+  summarise(first_landing = min(date), port_group = paste(port_group_code[date==min(date)], collapse=","))
+```
+```{r}
+## create function
+get_week_of_season_coast <- function(mydate, season, first_landing_df){
+  week_list = c()
+  ## for each item in the list
+  for(i in seq(1,length(mydate))){
+    ## save the date for that index
+    tmp_date=mydate[i]
+    ## save the fishing season for that index
+    tmp_season=season[i]
+    ## subset the first landing data frame to that season
+    sstart_df <- filter(first_landing_df, season==tmp_season)
+    ## if there were no landings for that season, set week == NA
+    if(length(sstart_df$first_landing) < 1){
+      week <- NA
+    } else{
+      ## save date associated with first landing
+      sstart <- ymd(sstart_df$first_landing)
+      ## get number of days that passed between the first landing and this ticket's date. divide by 7
+      difference <- as.numeric(difftime(tmp_date, sstart, unit="days")) / 7
+      ## round up the "difference". this provides the week within which the ticket was recorded
+      week <- ceiling(difference)
+      ## if the week is 0 (the date of the landing == first date for that season)
+      if(week == 0 & tmp_date == sstart){
+        ## reassign week as `1`
+        week <- 1
+      }
+    }
+    week_list[i] <- week
+  }
+  return(week_list)
+}
+```
+
+
+Function to calculate the week of the season, from first ticket at port group
+```{r}
+## get data frame of first fish ticket landed
+first_ticket_port <- vmsdat2_seasonFilter %>%
+  group_by(season, port_group_code) %>%
+  summarise(first_landing = min(date))
+
+
+## create function
+get_week_of_season_port <- function(mydate, season, port_group, first_landing_df){
+  week_list = c()
+  for(i in seq(1,length(mydate))){
+    tmp_date=mydate[i]
+    tmp_season=season[i]
+    tmp_port_group=port_group[i]
+    sstart_df <- filter(first_landing_df, season==tmp_season & port_group_code == tmp_port_group)
+    if(length(sstart_df$first_landing) < 1){
+      week <- NA
+    } else{
+      sstart <- ymd(sstart_df$first_landing)
+      difference <- as.numeric(difftime(tmp_date, sstart, unit="days")) / 7
+      week <- ceiling(difference)
+      ## added 10/3: if the week is 0 (the date of the landing == first date for that season)
+      if(week == 0 & tmp_date == sstart){
+        ## reassign week as `1`
+        week <- 1
+      }
+    }
+    week_list[i] <- week
+  }
+  return(week_list)
+}
+```
+<br>
+
+Function to calculate the week of the season, from official start date
+```{r}
+get_week_of_season_official <- function(mydate, season, port_group){
+  week_list <- c()
+  groupA <- c("CCA", "ERA", "BGA")
+  groupB <- c("BDA", "SFA", "MNA", "MRA", "SBA", "SDA", "LAA")
+  for(i in seq(1,length(mydate))){
+    tmp_date=mydate[i]
+    tmp_year=year(mydate[i])
+    tmp_season=season[i]
+    tmp_group=port_group[i]
+    if(month(tmp_date) < 8){
+      start_yr <- tmp_year - 1}
+    else{
+      start_yr <- tmp_year
+    }
+    if(tmp_group %in% groupA){
+      start_date <- ymd(paste0(start_yr, "-12-01"))
+      difference <- as.numeric(difftime(tmp_date, start_date, unit="days")) / 7
+      week <- ceiling(difference)
+      ## added 10/3: if the week is 0 (the date of the landing == first date for that season)
+      if(week == 0 & tmp_date == start_date){
+        ## reassign week as `1`
+        week <- 1
+      }
+    } else if(tmp_group %in% groupB){
+      start_date <- ymd(paste0(start_yr, "-11-15"))
+      difference <- as.numeric(difftime(tmp_date, start_date, unit="days")) / 7
+      week <- ceiling(difference)
+      ## added 10/3: if the week is 0 (the date of the landing == first date for that season)
+      if(week == 0 & tmp_date == start_date){
+        ## reassign week as `1`
+        week <- 1
+      }
+    } else{
+      print("port group not recognized")
+      week <- NA
+    }
+    week_list[i] <- week
+  }
+  return(week_list)
+}
+```
+<br>
+
+
+Add columns with different weeks of season
+```{r}
+vmsdat2_seasonFilter <- vmsdat2_seasonFilter %>%
+  mutate(season_week_coast = get_week_of_season_coast(mydate=date, season=season, first_landing_df=first_ticket_coast),
+         season_week_port = get_week_of_season_port(mydate=date, season=season, port_group=port_group_code, first_landing_df = first_ticket_port))
+```
+```{r}
+vmsdat2_seasonFilter <- vmsdat2_seasonFilter %>%
+  mutate(season_week_off = get_week_of_season_official(mydate=date, season=season, port_group=port_group_code))
+```
+<br>
+
+
+
+<br>
+Check the data frame!
+```{r}
+head(vmsdat2_seasonFilter)
+```
+```{r}
+tail(vmsdat2_seasonFilter)
+```
+<br>
+
+
+
+
+#### Does one vessel have two size classifications in the same season? 
+```{r}
+vessel_categories <- vmsdat2_seasonFilter %>%
+  select(DOCNUM, season, vessel_cat) %>%
+  distinct() %>%
+  group_by(DOCNUM, season) %>%
+  summarise(num_cats = n())
+```
+<br>
+
+If there are one or more vessels that have two size classifications in the same season...
+```{r}
+if(sum(vessel_categories$num_cats == 2) > 0){
+  ## Find the data for the vessel(s) that have different size categories for the same season. What are the different lengths?
+  tmp_vessels <- vessel_categories[which(vessel_categories$num_cats==2),]
+  tmp_vessels_info <- left_join(tmp_vessels, vmsdat2_seasonFilter, by=c("DOCNUM", "season"))
+  tmp_vessels_info %>% select(DOCNUM, season, FINAL_LENGTH) %>% distinct
+  
+  ## get the number of tickets per vessel category within each season
+  tmp_vessels_tickets_per_cat <- tmp_vessels_info %>%
+  group_by(DOCNUM, season, vessel_cat) %>%
+    summarise(n_per_cat = length(unique(Rec_ID)))
+  tmp_vessels_tickets_per_cat
+  
+  ## plot it
+  myplot <- ggplot(tmp_vessels_tickets_per_cat, aes(x=DOCNUM, y=n_per_cat)) +
+    geom_col(aes(fill=vessel_cat)) +
+    facet_wrap(~season) +
+    ylab("Number of Trips per Category")
+  print(myplot)
+  
+  ## pull out the maximum number of tickets recorded
+  max_tickets_per_cat <- tmp_vessels_tickets_per_cat %>%
+    group_by(DOCNUM) %>%
+    filter(n_per_cat == max(n_per_cat))
+  
+  ## reassign vessel category for each vessel
+  for(i in seq(1:length(max_tickets_per_cat$DOCNUM))){
+    tmp_vessel <- max_tickets_per_cat[i,]
+    tmp_docnum <- tmp_vessel$DOCNUM
+    tmp_season <- tmp_vessel$season
+    cat("Reassigned vessel category (as ", tmp_vessel$vessel_cat, ") to vessel", tmp_docnum, " for season", tmp_season, "\n")
+    vmsdat2_seasonFilter$vessel_cat[which(vmsdat2_seasonFilter$DOCNUM == tmp_docnum & vmsdat2_seasonFilter$season == tmp_season)] <- tmp_vessel$vessel_cat
+  }
+  
+  
+  ## did it work?
+  reassigned_vessels <- vmsdat2_seasonFilter %>%
+    filter(DOCNUM %in% tmp_vessels_tickets_per_cat$DOCNUM & season %in% tmp_vessels_tickets_per_cat$season) %>%
+    select(DOCNUM, season, FINAL_LENGTH, vessel_cat) %>%
+    distinct() %>%
+    arrange(DOCNUM)
+  reassigned_vessels
+} else{
+  print("No vessels assigned to different length categories within the same season!")
+}
+```
+<br>
+
+
+
+### Create data frame for `as.ltraj` function, with trip as "id"
+
+#### Ensure that R recognises the timestamp as a POSIXct class
+```{r}
+vmsdat2_seasonFilter$westcoastdate <- ymd_hms(vmsdat2_seasonFilter$westcoastdate, tz= "America/Los_Angeles")
+class(vmsdat2_seasonFilter$westcoastdate)
+vmsdat2_seasonFilter$westcoastdate <- ymd_hms(vmsdat2_seasonFilter$westcoastdate, tz= "America/Los_Angeles")
+class(vmsdat2_seasonFilter$westcoastdate)
+```
+<br>
+
+
+#### Deal with duplicates
+Remove all rows where "VMS_lookback_pres" is recorded as "Duplicated". *These Rec_IDs will be duplicates, so will return an error when creating an ltraj object*.
+```{r}
+dim(vmsdat2_seasonFilter)
+vmsdat2_seasonFilter_nodup1 <- filter(vmsdat2_seasonFilter, VMS_lookback_pres != "Duplicated")
+dim(vmsdat2_seasonFilter_nodup1)
+cat("Proportion of VMS records removed due to duplicated fish tickets:", 1-dim(vmsdat2_seasonFilter_nodup1)[1]/dim(vmsdat2_seasonFilter)[1])
+```
+<br>
+
+Ensure that there are no more duplicated dates under the same Rec_ID
+```{r}
+dim(vmsdat2_seasonFilter_nodup1)
+vmsdat2_seasonFilter_nodup <- vmsdat2_seasonFilter_nodup1[!duplicated(vmsdat2_seasonFilter_nodup1[,c("Rec_ID","westcoastdate", "UTCDATETIM")]),]
+dim(vmsdat2_seasonFilter_nodup)
+
+cat("Proportion of VMS records removed for being true duplicate records:", 1-dim(vmsdat2_seasonFilter_nodup)[1]/dim(vmsdat2_seasonFilter_nodup1)[1])
+```
+<br>
+
+Create a file with the duplicate entries to understand what data is being removed!
+```{r}
+vmsdat2_seasonFilter_dup <- rbind(vmsdat2_seasonFilter_nodup1[duplicated(vmsdat2_seasonFilter_nodup1[,c("Rec_ID","westcoastdate", "UTCDATETIM")], fromLast = FALSE),],
+                       vmsdat2_seasonFilter_nodup1[duplicated(vmsdat2_seasonFilter_nodup1[,c("Rec_ID","westcoastdate", "UTCDATETIM")], fromLast = TRUE),])
+vmsdat2_seasonFilter_dup <- vmsdat2_seasonFilter_dup %>% arrange(Rec_ID, desc(westcoastdate))
+write.csv(x=vmsdat2_seasonFilter_dup, "ProcessVMS/R_Output/interpolation/VMS2010_targetDCRB_CA_SeasonWeek_all_duplicates_pertrip.csv")
+```
+For the run 9/26 with 2009-2012 data, the duplicates appear to be repeat records with the same VMS record number / trip ID. Implies that at some point in the prep script, the records for the same trip / day / VMS point are being duplicated??
+<br>
+
+
+
+#### Write file for use in future
+Create a file with the input data frame for the `as.ltraj` function.
+```{r}
+write.csv(x=vmsdat2_seasonFilter_nodup, "ProcessVMS/R_Output/interpolation/VMSdat_2010_CA_targetDCRB_inseason_SeasonWeek_all_perTrip.csv", row.names=FALSE, quote = FALSE)
+```
+<br>
+
+
+
+
+### Create `ltraj` object, with trip as "id"
+Load package (note-loading package in the beginning of the script will mask "id" variable from dplyr.)
+```{r}
+library(adehabitatLT)
+library(dplyr)
+```
+
+```{r}
+vmsdat2_seasonFilter_nodup$DECLARATIO[vmsdat2_seasonFilter_nodup$DECLARATIO == "N/A"] <- NA
+```
+<br>
+```{r}
+colnames(vmsdat2_seasonFilter_nodup)
+```
+<br>
+
+<br>
+
+```{r}
+which(duplicated(vmsdat2_seasonFilter_nodup[,c("Rec_ID", "westcoastdate")])) #one entry: 87996
+```
+```{r}
+vmsdat2_seasonFilter_nodup[89671:89672,c("Rec_ID", "UTCDATETIM","westcoastdate")]
+```
+```{r}
+with_tz(parse_date_time(vmsdat2_seasonFilter_nodup[89671,"UTCDATETIM"], orders="Ymd_HMS"), tzone = "America/Los_Angeles")
+with_tz(parse_date_time(vmsdat2_seasonFilter_nodup[89672,"UTCDATETIM"], orders="Ymd_HMS"), tzone = "America/Los_Angeles")
+```
+ok, so this is crazy. DAYLIGHT SAVINGS TIME is messing up the data; there is one entry where the location data was sent in before and after daylight savings time took effect *at the exact same minute* and so when UTC is converted to America/Los_Angeles time zone, it's the same time. 
+
+I'm going to cheat a little here and change the second entry to "2010-11-07 01:39:00 PDT" instead of "2010-11-07 01:38:00 PDT".
+```{r}
+vmsdat2_seasonFilter_nodup[89672,"westcoastdate"] <- "2010-11-07 01:39:00 PDT"
+```
+
+<br>
+
+
+```{r}
+ltraj_week <- adehabitatLT::as.ltraj(xy=vmsdat2_seasonFilter_nodup[,c("X_COORD","Y_COORD")], 
+                date=vmsdat2_seasonFilter_nodup$westcoastdate, 
+                id=vmsdat2_seasonFilter_nodup$Rec_ID,
+                infolocs = vmsdat2_seasonFilter_nodup[,c("DOCNUM","vessel_cat",
+                                                         "port_group_code", "date",
+                                                         "season", "period", "season_week_coast", "season_week_port")])
+```
+*When I try to include the variable `season_week`, I get the error: `Error in match.arg(method) : 'arg' must be of length 1`*
+<br>
+
+With lat/long
+```{r}
+ltraj_lat <- adehabitatLT::as.ltraj(xy=vmsdat2_seasonFilter_nodup[,c("LATITUDE","LONGITUDE")], 
+                date=vmsdat2_seasonFilter_nodup$westcoastdate, 
+                id=vmsdat2_seasonFilter_nodup$Rec_ID,
+                infolocs = vmsdat2_seasonFilter_nodup[,c("DOCNUM","vessel_cat",
+                                                         "port_group_code", "date",
+                                                         "season", "period", "season_week_coast", "season_week_port")])
+```
+<br>
+
+Turn it back into a data frame
+```{r}
+vmsdat_ltraj <- ld(ltraj_week)
+vmsdat_ltraj_lat <- ld(ltraj_lat)
+```
+
+
+Edit the column names for the fish ticket `date`
+```{r}
+colnames(vmsdat_ltraj)[which(colnames(vmsdat_ltraj) == "date.1")] <- "ticket_date"
+colnames(vmsdat_ltraj_lat)[which(colnames(vmsdat_ltraj_lat) == "date.1")] <- "ticket_date"
+```
+<br>
+
+Write out `ltraj` data frame.
+```{r}
+write.csv(vmsdat_ltraj, "ProcessVMS/R_Output/interpolation/ltraj_VMS2010_CA_targetDCRB_inseason_SeasonWeek_all_perTrip.csv", row.names=FALSE)
+```
+<br>
+
+Write out `ltraj` data frame.
+```{r}
+write.csv(vmsdat_ltraj_lat, "ProcessVMS/R_Output/interpolation/ltraj_VMS2010_LAT_CA_targetDCRB_inseason_SeasonWeek_all_perTrip.csv", row.names=FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

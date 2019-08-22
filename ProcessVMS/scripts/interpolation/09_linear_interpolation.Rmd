@@ -1,0 +1,411 @@
+---
+title: "Interpolation"
+output: html_document
+---
+
+Linear interpolation of time gaps that are either (1) less than 5 hours, or (2) accumulated when the vessel was in port. Uses the `move` package. 
+
+<br>
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS-repo") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r include=FALSE}
+library(dplyr)
+library(tidyr)
+library(lubridate) 
+library(ggplot2)
+library(move)
+library(rgdal)
+```
+<br>
+
+Create Objects / Data Frames
+```{r}
+## directory where filtered VMS data is stored as .csv file
+VMS_dir = "ProcessVMS/R_Output/interpolation/"
+
+## calendar years
+years <- c(2015)
+
+## recalculate the average speed?
+recalc_speed = TRUE
+```
+<br>
+
+
+
+### Read in the data
+
+First, the full vms data set
+```{r rawdat}
+for(i in seq(1,length(years))){
+  y <- years[i]
+  if(i == 1){
+    vms <- read.csv(paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_final_cleaned.csv"))
+  } else{
+    tmp_vms <-read.csv(paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_final_cleaned.csv"))
+    vms <- rbind(vms, tmp_vms)
+  }
+}
+
+if("X" %in% colnames(vms)){
+  vms <- dplyr::select(vms, -X)
+}
+cat("VMS data consists of ", length(unique(vms$Rec_ID)), " fishing trips.\n")
+head(vms)
+```
+<br>
+
+### Interpolate using a `move` object / `interpolateTime`
+#### Ensure that R recognises the timestamp as a POSIXct class
+```{r}
+vms$westcoastdate <- ymd_hms(vms$westcoastdate, tz= "America/Los_Angeles")
+class(vms$westcoastdate)
+vms$UTCDATETIM <- ymd_hms(vms$UTCDATETIM, tz= "UTC")
+vms$DECLARATIO[vms$DECLARATIO == "N/A"] <- NA
+```
+<br>
+
+#### Order timestamps within each individual
+```{r}
+vms <- vms %>%
+  arrange(Rec_ID, UTCDATETIM)
+```
+<br>
+
+```{r move}
+start.time <- Sys.time()
+movedat <- move(x=vms$X_COORD,
+                y=vms$Y_COORD,
+                time=vms$UTCDATETIM,
+                data=vms,
+                proj=sp::CRS("+proj=utm +north +zone=10 +ellps=WGS84"),
+                animal=vms$Rec_ID)
+Sys.time() - start.time
+```
+<br>
+
+#### Function to loop over each trip in a data frame and interpolate
+
+Starting from a MoveStack object
+```{r}
+interpolate_trips <- function(movedata, timestep=60, units="mins", method = "euclidean", clean=TRUE){
+  # number of trips
+  n_trips <- n.indiv(movedata)
+  # for loop
+  for(i in seq(1,n_trips)){
+    tmp_movedat <- movedata[[i]]
+    inter_movedat <- interpolateTime(x=tmp_movedat, time=as.difftime(timestep, units=units), spaceMethod=method)
+    inter_df <- as.data.frame(inter_movedat)
+    if(clean){
+      #clean up the data frame
+      inter_df <- inter_df %>%
+        dplyr::select(Rec_ID, DOCNUM, UTCDATETIM, X_COORD, Y_COORD, in_port, to_rm, timestamps, coords.x1, coords.x2, sensor)
+    }
+    
+    if(i == 1){
+      interpolated_data <- inter_df
+    } else{
+      interpolated_data <- rbind(interpolated_data, inter_df)
+    }
+    if(i%%500==0){
+      message("completed interpolation for ", i, " out of ", n_trips, " trips.")
+    }
+  }
+  return(interpolated_data)
+}
+```
+<br>
+
+### Linear Interpolation
+
+```{r interpolate}
+start.time <- Sys.time()
+interpolated_vms <- interpolate_trips(movedata = movedat, timestep=60, units="mins", method = "euclidean", clean=TRUE)
+Sys.time() - start.time
+```
+On 2016 data, time difference of 1.357018 hours
+
+<br>
+
+
+### Regularized data: Integrated interpolated data into original data frame
+The following will only run properly if the `clean` argument in the `interpolated_vms` function is set to TRUE.
+
+First, separate interpolated data from the original data points so that new vms columns can be renamed
+```{r}
+orig_vms <- interpolated_vms %>%
+  filter(sensor=="unknown") %>%
+  dplyr::select(Rec_ID, DOCNUM, UTCDATETIM, X_COORD, Y_COORD, sensor)
+new_vms <- interpolated_vms %>%
+  filter(sensor=="interpolateTime") %>%
+  dplyr::select(-UTCDATETIM, -X_COORD, -Y_COORD)
+colnames(new_vms)[which(colnames(new_vms) == "timestamps")] <- "UTCDATETIM"
+colnames(new_vms)[which(colnames(new_vms) == "coords.x1")] <- "X_COORD"
+colnames(new_vms)[which(colnames(new_vms) == "coords.x2")] <- "Y_COORD"
+head(new_vms)
+```
+<br>
+
+Get trip / record-specific info for the original vms data points that were retained.
+```{r}
+orig_vms <- left_join(orig_vms, vms, by=c("Rec_ID", "DOCNUM", "UTCDATETIM", "X_COORD", "Y_COORD"))
+```
+<br>
+
+Get trip info for the new vms data points. This originally pulled from the full `vms` data frame, but for a few trips, one of the vessel had multiple listed names. This duplicated time stamps when joining. This is avoided by pulling trip info from the `orig_vms` data frame.
+```{r}
+vms_trip_info <- orig_vms %>%
+  dplyr::select(Rec_ID, DOCNUM, VESSEL_NAM, DECLARATIO, TARGET, Port_Of_Landing, TARGET_max) %>%
+  distinct()
+# one vessel had multiple names listed for trip id/ docnum
+if(dim(vms_trip_info[duplicated(vms_trip_info[,c("Rec_ID", "DOCNUM")]),])[1] > 0){
+  print(vms_trip_info[duplicated(vms_trip_info[,c("Rec_ID", "DOCNUM")]),])
+  vms_trip_info <- vms_trip_info[!duplicated(vms_trip_info[,c("Rec_ID", "DOCNUM")]),]
+}
+new_vms <- left_join(new_vms, vms_trip_info, by=c("Rec_ID", "DOCNUM"))
+sum(is.na(new_vms$TARGET))
+```
+<br>
+
+Create calculable missing columns: west coast dates, latitude, longitude. 
+```{r}
+# west coast dates
+new_vms <- new_vms %>%
+  mutate(westcoastdate = with_tz(UTCDATETIM, tzone = "America/Los_Angeles"),
+         westcoastdate_notime = as_date(westcoastdate))
+
+# convert UTM x/y coordinates to lat/lon
+new_vms_coords <- new_vms
+coordinates(new_vms_coords) <- c("X_COORD", "Y_COORD")
+new_vms.spatial <- SpatialPoints(new_vms_coords, proj4string=CRS("+proj=utm +north +zone=10 +ellps=WGS84"))
+data.LL <-spTransform(new_vms.spatial, CRS("+proj=longlat +datum=WGS84"))
+data.LL.df <- as.data.frame(data.LL); colnames(data.LL.df) <- c("LONGITUDE", "LATITUDE")
+
+# add the new lat/lon into the dataset
+new_vms <- new_vms %>%
+  mutate(LONGITUDE = data.LL.df$LONGITUDE,
+         LATITUDE = data.LL.df$LATITUDE)
+head(new_vms)
+```
+<br>
+
+Add in VMS Record Numbers for new VMS points
+```{r}
+new_recnos <- seq(from=(max(vms$VMS_RECNO)+10), length.out=length(new_vms$Rec_ID))
+new_vms <- mutate(new_vms, VMS_RECNO = new_recnos)
+```
+<br>
+
+Recombine
+```{r}
+orig_vms$westcoastdate_notime <- ymd(orig_vms$westcoastdate_notime)
+vms_regular <- full_join(orig_vms, new_vms, by=colnames(new_vms))
+# check record numbers
+length(unique(vms_regular$VMS_RECNO))/length(vms_regular$VMS_RECNO)
+```
+<br>
+
+Optional: Recalculate the average speed for each record, and save it as an extra column. **untested**
+```{r}
+if(recalc_speed){
+  start.time <- Sys.time()
+  # arrange data
+  vms_regular <- vms_regular %>% arrange(Rec_ID, UTCDATETIM)
+  # check for duplicates
+  
+  # convert to movestack
+  movedat <- move(x=vms_regular$X_COORD,
+                  y=vms_regular$Y_COORD,
+                  time=vms_regular$UTCDATETIM,
+                  data=vms_regular,
+                  proj=sp::CRS("+proj=utm +north +zone=10 +ellps=WGS84"),
+                  animal=vms_regular$Rec_ID)
+  message("created MoveStack object")
+  # calculate time and distance between records
+  timestep <- timeLag(movedat, units="secs")
+  diststep <- distance(movedat)
+  message("calculated distance and time steps.")
+  movedat$dt <- unlist(lapply(timestep, c, NA))
+  movedat$dx <- unlist(lapply(diststep , c, NA))
+  # turn back into data frame
+  vms_reg_move <- as.data.frame(movedat)
+  vms_reg_move <- vms_reg_move %>%
+    dplyr::select(c(Rec_ID, X_COORD, Y_COORD, UTCDATETIM, dt, dx)) %>%
+    arrange(Rec_ID, UTCDATETIM)
+  # calculate new average speed
+  vms_reg_move <- vms_reg_move %>%
+    mutate(avg_speed_recalc = dx/dt)
+  # join average speeds back to data frame
+  vms_reg_move$Rec_ID  <- as.character(vms_reg_move$Rec_ID)
+  vms_regular$Rec_ID <- as.character(vms_regular$Rec_ID)
+  vms_regular <- left_join(vms_regular, vms_reg_move, by=c("Rec_ID", "UTCDATETIM", "X_COORD", "Y_COORD"))
+  message("added average speeds to data frame.")
+  Sys.time() - start.time
+}
+```
+<br>
+
+
+Reorder columns
+```{r}
+if(recalc_speed){
+  vms_regular <- vms_regular[,c("Rec_ID","DOCNUM","UTCDATETIM","LATITUDE","LONGITUDE","VESSEL_NAM","DECLARATIO","X_COORD","Y_COORD","westcoastdate","westcoastdate_notime","avg_speed_recalc","TARGET","Port_Of_Landing","TARGET_max","sensor","VMS_RECNO")]
+} else{
+  vms_regular <- vms_regular[,c("Rec_ID","DOCNUM","UTCDATETIM","LATITUDE","LONGITUDE","VESSEL_NAM","DECLARATIO","X_COORD","Y_COORD","westcoastdate","westcoastdate_notime","TARGET","Port_Of_Landing","TARGET_max","sensor","VMS_RECNO")]
+}
+```
+<br>
+
+Write out
+```{r}
+write.csv(vms_regular, paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_final_cleaned_interpolated_regular.csv"), row.names=FALSE)
+```
+<br>
+
+
+
+### All data: Integrated interpolated data into original data frame
+The following will only run properly if the `clean` argument in the `interpolated_vms` function is set to TRUE.
+
+
+Join new vms to original vms
+```{r}
+vms$westcoastdate_notime <- ymd(vms$westcoastdate_notime)
+vms_all <- full_join(vms, new_vms, by=colnames(new_vms)[which(colnames(new_vms) != "sensor")])
+# check record numbers
+length(unique(vms_all$VMS_RECNO))/length(vms_all$VMS_RECNO)
+```
+<br>
+
+For all NAs in sensor, write "data"
+```{r}
+vms_all$sensor <- as.character(vms_all$sensor)
+vms_all$sensor[which(is.na(vms_all$sensor))] <- "data"
+```
+<br>
+
+Optional: Recalculate the average speed for each record, and save it as an extra column. **untested**
+```{r}
+if(recalc_speed){
+  start.time <- Sys.time()
+  # arrange data
+  vms_all <- vms_all %>% arrange(Rec_ID, UTCDATETIM)
+  # convert to movestack
+  movedat <- move(x=vms_all$X_COORD,
+                  y=vms_all$Y_COORD,
+                  time=vms_all$UTCDATETIM,
+                  data=vms_all,
+                  proj=sp::CRS("+proj=utm +north +zone=10 +ellps=WGS84"),
+                  animal=vms_all$Rec_ID)
+  message("created MoveStack object")
+  # calculate time and distance between records
+  timestep <- timeLag(movedat, units="secs")
+  diststep <- distance(movedat)
+  movedat$dt <- unlist(lapply(timestep, c, NA))
+  movedat$dx <- unlist(lapply(diststep , c, NA))
+  message("calculated distance and time steps.")
+  # turn back into data frame
+  vms_all_move <- as.data.frame(movedat)
+  vms_all_move <- vms_all_move %>%
+    dplyr::select(c(Rec_ID, X_COORD, Y_COORD, UTCDATETIM, dt, dx)) %>%
+    arrange(Rec_ID, UTCDATETIM)
+  # calculate new average speed
+  vms_all_move <- vms_all_move %>%
+    mutate(avg_speed_recalc = dx/dt)
+  # join average speeds back to data frame
+  vms_all_move$Rec_ID  <- as.character(vms_all_move$Rec_ID)
+  vms_all$Rec_ID <- as.character(vms_all$Rec_ID)
+  vms_all <- left_join(vms_all, vms_all_move, by=c("Rec_ID", "UTCDATETIM", "X_COORD", "Y_COORD"))
+    message("added average speeds to data frame.")
+  Sys.time() - start.time
+}
+```
+<br>
+
+
+Write out as csv
+```{r}
+write.csv(vms_all, paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_final_cleaned_interpolated_all.csv"), row.names=FALSE)
+```
+<br>
+
+
+
+
+
+
+
+
+
+
+
+
+
+<br>
+<br>
+
+________________
+
+### Alternative interpolation: starting from a data frame
+Starting from a data frame, rather than a `moveStack` object, took about 30% longer to run. 
+
+Function
+```{r eval=FALSE}
+interpolate_trips <- function(mydata, timestep=60, units="mins", method = "euclidean", clean=TRUE){
+  # number of trips
+  trip_ids <- unique(mydata$Rec_ID)
+  n_trips <- length(trip_ids)
+  # for loop
+  for(i in seq(1,n_trips)){
+    tmp_vms <- filter(mydata, Rec_ID == trip_ids[i])
+    movedat <- move(x=tmp_vms$X_COORD,
+                    y=tmp_vms$Y_COORD,
+                    time=tmp_vms$UTCDATETIM,
+                    data=tmp_vms,
+                    proj=sp::CRS("+init=epsg:32610"),
+                    animal=tmp_vms$Rec_ID)
+    inter_movedat <- interpolateTime(x=movedat, time=as.difftime(timestep, units=units), spaceMethod=method)
+    inter_df <- as.data.frame(inter_movedat)
+    if(clean){
+      #clean up the data frame
+      inter_df <- inter_df %>%
+        dplyr::select(Rec_ID, DOCNUM, UTCDATETIM, X_COORD, Y_COORD, timestamps, coords.x1, coords.x2, sensor)
+    }
+    
+    if(i == 1){
+      interpolated_data <- inter_df
+    } else{
+      interpolated_data <- rbind(interpolated_data, inter_df)
+    }
+    if(i%%500==0){
+      message("completed interpolation for ", i, " out of ", n_trips, " trips.")
+    }
+  }
+  return(interpolated_data)
+}
+```
+Calls on function above.
+```{r eval=FALSE}
+start.time <- Sys.time()
+interpolated_vms <- interpolate_trips(mydata=vms, timestep=60, units="mins", method = "euclidean", clean=TRUE)
+Sys.time() - start.time
+```
+time difference: 1.792642 hrs
+
+
+
+
+
+

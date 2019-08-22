@@ -1,0 +1,183 @@
+---
+title: "Returns to Port"
+output: html_document
+---
+
+Document returns to port for Dungeness crab trips. 
+
+This uses Blake's depth key to identify in port records.
+
+Why? I'm thinking of truncating the VMS data, so that the input for home range / trip duration analysis only covers from when the vessel returned to port to sell fish, back to the last time the vessel left port. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "D:/VMS-repo") 
+```
+<br>
+
+### Prep for running code
+
+```{r}
+rm(list=ls())
+```
+<br>
+```{r include=FALSE}
+library(adehabitatHR)
+library(lubridate)
+library(ggmap)
+library(ggplot2)
+library(dplyr)
+library(maps)
+library(rgdal)
+library(rgeos)
+library(raster)
+```
+<br>
+
+Input / variables
+```{r}
+datfile <- "ProcessVMS/R_Output/interpolation/VMS_Outputs_wTARGET_10d_lookback_2010_final_cleaned_interpolated_regular.csv"
+outfile <- "HomeRange/R_Output/2010_DCRB_TripCharacteristics_"
+```
+<br>
+
+
+### Read in data
+**VMS data**
+```{r vms}
+vms <- read.csv(datfile)
+head(vms)
+```
+
+**Bathymetry**
+```{r bathy}
+bathy.grid <- readRDS("Input_Data/bathymetry/vms_composite_bath_spGrid.RDS")
+```
+<br>
+
+### Find in-port points
+Get bathymetry at VMS data points.
+```{r add_depth}
+vms_sp <- vms
+coordinates(vms_sp) <- c("LONGITUDE", "LATITUDE") 
+proj4string(vms_sp) <- CRS("+init=epsg:4326") # WGS 84
+crs(bathy.grid) <- CRS("+init=epsg:4326") # WGS 84
+bathy.points <- over(vms_sp, bathy.grid)$vms_composite_bath
+vms <- mutate(vms, NGDC_M = bathy.points)
+```
+<br>
+
+Use Blake's coding system to identify in-port points
+```{r}
+vms <- mutate(vms, in_port = ifelse(NGDC_M < -100000, "in_port", "offshore"))
+```
+<br>
+
+Filter to Dungeness crab, negative bathymetry
+```{r}
+dcrb_vms <- vms %>%
+  filter(TARGET_max=="DCRB") %>%
+  filter(NGDC_M < 5)
+```
+<br>
+
+### Check number of time vessel leaves port
+
+Find trips where the vessel leaves port more than once (identified by the sequence of an in-port and then an offshore record).
+```{r leaves}
+leave_port <- dcrb_vms %>% arrange(Rec_ID, UTCDATETIM) %>%
+  group_by(Rec_ID) %>%
+  mutate(leave_port = in_port == "in_port" & lead(in_port == "offshore"), g=cumsum(leave_port)) %>%
+  filter(leave_port | lag(leave_port)) %>%
+  dplyr::select(Rec_ID, g) %>%
+  distinct()
+sum(leave_port$g > 1) / length(leave_port$g)
+```
+<br>
+
+Now read in duration of each trip, in days
+```{r}
+duration <- read.csv("ProcessVMS/R_Output/WEAR_Workshop/2010_2016-2018_regularizedVMS_trip_duration.csv")
+duration <- filter(duration, year == 2010)
+```
+<br>
+
+Match to the leave port data frame, using Rec_ID
+```{r}
+leave_port <- left_join(leave_port, duration, by="Rec_ID")
+```
+<br>
+
+```{r}
+ggplot(leave_port, aes(x=g, y=n.days, group = g)) +
+  geom_boxplot() +
+  xlab("Leaves Port") +
+  ylab("Days of Trip")
+```
+<br>
+
+### Check number of times vessel enters port
+
+Find trips where the vessel leaves port more than once (identified by the sequence of an in-port and then an offshore record).
+```{r enters}
+enter_port <- dcrb_vms %>% arrange(Rec_ID, UTCDATETIM) %>%
+  group_by(Rec_ID) %>%
+  mutate(enter_port = in_port == "offshore" & lead(in_port == "in_port"), g=cumsum(enter_port)) %>%
+  filter(enter_port | lag(enter_port)) %>%
+  group_by(Rec_ID) %>%
+  summarise(g = max(g))
+sum(enter_port$g ==0) / length(enter_port$g)
+```
+<br>
+
+Match to the leave port data frame, using Rec_ID
+```{r}
+enter_port <- left_join(enter_port, duration, by="Rec_ID")
+enter_port <- mutate(enter_port, size_cat = ifelse(FINAL_LENGTH >= 40, "Large", "Small"))
+```
+<br>
+
+```{r}
+ggplot(enter_port, aes(x=g)) + 
+  geom_histogram() + theme_bw()
+ggplot(data=filter(enter_port, !is.na(FINAL_LENGTH)), aes(y=FINAL_LENGTH, x=g)) + 
+  geom_point() + theme_bw() +xlab("Enters Port") + ylab("Vessel Length (ft)")
+ggplot(enter_port, aes(x=as.factor(g), y=n.days)) +
+  geom_boxplot() +
+  xlab("Enters Port") +
+  ylab("Days of Trip")
+```
+<br>
+
+WTF is going on when the vessel enters port more than 5 times?
+```{r}
+weird_trips <- filter(enter_port, g > 5)
+weird_trips_vms <- filter(dcrb_vms, Rec_ID %in% weird_trips$Rec_ID)
+length(unique(weird_trips$Rec_ID))
+```
+<br>
+
+
+```{r plot}
+data(stateMapEnv)
+states_df <- map_data("state") %>%
+  filter(region == "california" | region=="oregon" | region=="washington")
+for(trip in unique(weird_trips$Rec_ID)){
+  tmp_vms <- filter(weird_trips_vms, Rec_ID==trip)
+  myplot<- ggplot() +
+    geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+    geom_point(data=tmp_vms, aes(x=LONGITUDE, y=LATITUDE, col=westcoastdate_notime), alpha=0.5) +
+    geom_path(data=tmp_vms, aes(x=LONGITUDE, y=LATITUDE), col="grey10", alpha=0.5) +
+    coord_cartesian(xlim=c(min(tmp_vms$LONGITUDE - 0.25), max(tmp_vms$LONGITUDE + 0.25)), ylim=c(min(tmp_vms$LATITUDE -0.25), max(tmp_vms$LATITUDE +0.25))) +
+    ggtitle(trip)
+  print(myplot)
+}
+```
+<br>
+
+```{r}
+dcrb_vms %>% filter(Rec_ID == trip) %>% dplyr::select(Rec_ID, westcoastdate, Port_Of_Landing, avg_speed_recalc, NGDC_M, in_port)
+```
+
+
+  

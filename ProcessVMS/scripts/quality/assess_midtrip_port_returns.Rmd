@@ -1,0 +1,364 @@
+---
+title: "Mid-Trip Returns Assessment"
+output: html_document
+---
+
+I was left with more questions on the apparent mid-trip returns occurring in the data set. This script takes a look at the phenomena on both a broader and individual trip scale. The assignment of in-port points to specific port locations was used for some of the questions below.
+
+
+
+
+<br>
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS-repo") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r include=FALSE}
+#install.packages("foreign")
+#install.packages("dplyr")
+#install.packages("tidyr")
+#install.packages("lubridate") #https://rstudio-pubs-static.s3.amazonaws.com/28038_1bcb9aa80ca84f27ace07d612872861a.html
+
+library(foreign)
+library(dplyr)
+library(tidyr)
+library(lubridate) 
+library(ggplot2)
+library(maps)
+library(rgdal)
+library(rgeos)
+```
+<br>
+
+Create Objects / Data Frames
+```{r}
+## directory where Blake's processed VMS data is stored as .dbf files
+origVMS_dir = "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+
+## directory where the filtered VMS data will be written out
+filterVMS_dir = "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+
+## file with port coordinates, including directory
+coords_file = "Input_Data/port_coords_fromBlake.csv"
+
+## calendar years
+years <- c(2010)
+
+## width of buffer circle (in meters)
+r = 3000
+```
+<br>
+
+### Read in the data
+
+First, the full vms data set
+```{r}
+vms <- read.csv(paste0(origVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_2010_cleaned.csv"))
+dim(vms)
+head(vms)
+dcrb_vms <- filter(vms, TARGET_max == "DCRB")
+```
+<br>
+
+Then, the coordinates for the ports
+```{r}
+portdat <- read.csv(coords_file)
+if(any(is.na(portdat$lat))==TRUE){
+  message("WARNING: some ports are missing coordinates. ports were removed from data frame.")
+  portdat <- filter(portdat, !is.na(lat))
+}
+port_coords <- portdat
+```
+
+
+### Prep the port coordinates
+*Note - to assign a project, `proj4string` requires coordinates in xy (lng/lat) order*
+```{r}
+coordinates(port_coords) <- c("Lon", "Lat") 
+proj4string(port_coords) <- CRS("+init=epsg:4326") # WGS 84
+port_coords_geo <- spTransform(port_coords, CRSobj = CRS("+init=epsg:32610"))
+```
+<br>
+
+### Create buffer
+```{r}
+buffer_polygons <- gBuffer(port_coords_geo, byid=TRUE, width=r)
+```
+<br>
+
+Get correct input format / coordinate system for ggplot
+```{r}
+ports_df <- data.frame(port_coords)
+buffer_polygons_LL <- spTransform(buffer_polygons, CRSobj = CRS("+init=epsg:4326"))
+plot(buffer_polygons_LL)
+```
+<br>
+
+Basemap
+```{r}
+data(stateMapEnv)
+states_df <- map_data("state") %>%
+  filter(region == "california" | region=="oregon" | region=="washington")
+```
+
+Plot coastline
+```{r}
+ggplot() +
+  geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+  geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red") +
+  coord_cartesian(xlim=c(-127, -112), ylim=c(32, 49)) +
+  geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+  geom_text(data=ports_df, aes(x=Lon, y=Lat, label=port_code),size=2, nudge_x=-0.51) 
+```
+<br>
+
+Assign projection to VMS points
+```{r}
+dcrb_vms_sp <- dcrb_vms
+coordinates(dcrb_vms_sp) <- c("LONGITUDE", "LATITUDE") 
+proj4string(dcrb_vms_sp) <- CRS("+init=epsg:4326") # WGS 84
+dcrb_vms_geo <- spTransform(dcrb_vms_sp, CRSobj = CRS("+init=epsg:32610"))
+```
+<br>
+
+
+### Identify data points within buffer zones
+```{r}
+in.port <- over(dcrb_vms_geo, buffer_polygons)$port_code
+dcrb_vms <- mutate(dcrb_vms, in_port = in.port)
+```
+<br>
+
+
+Mark "remove" if the record is in port *and* the avg speed is < 0.05.
+```{r}
+dcrb_vms <- mutate(dcrb_vms, to_rm = ifelse(!is.na(in_port) & AVG_SPEED < 1, "remove", "retain"))
+cat("Proportion of VMS records removed: ", sum(dcrb_vms$to_rm == "remove") / dim(dcrb_vms)[1], "\n")
+cat("There were ", dim(dcrb_vms)[1]/sum(dcrb_vms$to_rm == "retain"), "x VMS records in the unfiltered data than will be retained.\n")
+cat("Proportion of VMS records marked in-port removed: ", sum(dcrb_vms$to_rm == "remove") / sum(!is.na(dcrb_vms$in_port)))
+```
+<br>
+
+### Remove in-port points at start / end of trip
+
+First, I need to get the time of the first and last "retain" record in each trip.
+```{r}
+dcrb_vms$westcoastdate <- ymd_hms(dcrb_vms$westcoastdate)
+time_retain <- dcrb_vms %>%
+  filter(to_rm == "retain") %>%
+  group_by(Rec_ID) %>%
+  summarise(first_retain = min(westcoastdate), last_retain = max(westcoastdate))
+dcrb_vms_ext <- left_join(dcrb_vms, time_retain, by="Rec_ID")
+```
+<br>
+
+Then I can remove all rows marked "to remove" that are earlier than the first "retain" record, or later than the last "retain" record.
+```{r}
+dcrb_vms_part_rm <- dcrb_vms_ext %>%
+  filter(westcoastdate > first_retain & westcoastdate < last_retain)
+```
+<br>
+
+
+Write this out:
+```{r}
+write.csv(dcrb_vms_part_rm, "ProcessVMS/R_Output/match/unfiltered/cleaned/DCRB_VMS_Outputs_wTARGET_10d_lookback_2010_tripedge_inport_rm.csv",
+          row.names=FALSE)
+```
+<br>
+
+
+### Assessment
+
+#### What proportion of trips still have data points marked "to remove", overall and by port group?
+```{r}
+midtrip_removals <- dcrb_vms_part_rm %>%
+  group_by(Rec_ID, Port_Of_Landing) %>%
+  summarise(midtrip = ifelse("remove" %in% to_rm, "y", "n"))
+
+count_midtrip_removals <- midtrip_removals %>%
+  group_by(Port_Of_Landing) %>%
+  summarise(ntrips = sum(midtrip == "y"), ptrips = ntrips / n())
+```
+<br>
+
+```{r}
+ggplot(count_midtrip_removals, aes(x=Port_Of_Landing, y=ntrips)) +
+  geom_col() +
+  ggtitle("Number of Trips with MidTrip Removals") +
+  theme(axis.text.x = element_text(angle=90, hjust=1))
+ggplot(count_midtrip_removals, aes(x=Port_Of_Landing, y=ptrips)) +
+  geom_col() +
+  ggtitle("Proportion of Trips with MidTrip Removals")+
+  theme(axis.text.x = element_text(angle=90, hjust=1))
+```
+<br>
+
+#### Of trips with midtrip removals, how many are marked as within the Port of Landing?
+
+Get vms records for trips with midtrip removals
+```{r}
+midtrip_removals <- filter(midtrip_removals, midtrip == "y")
+midtrip_removals_vms <- left_join(midtrip_removals, dcrb_vms_part_rm, by=c("Rec_ID", "Port_Of_Landing"))
+```
+<br>
+
+mark in-port records based on whether the in-port designation matches the port of landing
+```{r}
+midtrip_removals_vms$Port_Of_Landing <- as.character(midtrip_removals_vms$Port_Of_Landing)
+midtrip_removals_vms <- midtrip_removals_vms %>%
+  mutate(midreturn = ifelse(is.na(in_port), NA,
+                            ifelse(Port_Of_Landing == in_port & to_rm == "remove", "Y", "N")))
+```
+<br>
+
+count trips where midtrip removals were returns to Port of Landing
+```{r}
+midtrip_returns <- midtrip_removals_vms %>%
+  group_by(Port_Of_Landing, Rec_ID) %>%
+  summarise(didreturn = ifelse(sum(midreturn == "Y", na.rm=TRUE) > 2, "Y", "N"))
+count_midtrip_returns <- midtrip_returns %>%
+  group_by(Port_Of_Landing) %>%
+  summarise(ntrips = sum(didreturn == "Y"), ptrips = ntrips / n())
+```
+<br>
+
+```{r}
+ggplot(count_midtrip_returns, aes(x=Port_Of_Landing, y=ntrips)) +
+  geom_col() +
+  ggtitle("Number of Trips with MidTrip Removals\n that Returned to Port of Landing") +
+  theme(axis.text.x = element_text(angle=90, hjust=1))
+ggplot(count_midtrip_returns, aes(x=Port_Of_Landing, y=ptrips)) +
+  geom_col() +
+  ggtitle("Proportion of Trips with MidTrip Removals\n that Returned to Port of Landing")+
+  theme(axis.text.x = element_text(angle=90, hjust=1))
+```
+<br> 
+
+#### Of all trips, what proportion are returning to the Port of Landing?
+
+Get vms records for trips with midtrip removals
+```{r}
+midtrip_removals <- filter(midtrip_removals, midtrip == "y")
+midtrip_removals_vms <- left_join(midtrip_removals, dcrb_vms_part_rm, by=c("Rec_ID", "Port_Of_Landing"))
+```
+<br>
+
+mark in-port records based on whether the in-port designation matches the port of landing
+```{r}
+midtrip_removals_vms$Port_Of_Landing <- as.character(midtrip_removals_vms$Port_Of_Landing)
+midtrip_removals_vms <- midtrip_removals_vms %>%
+  mutate(midreturn = ifelse(is.na(in_port), NA,
+                            ifelse(Port_Of_Landing == in_port, "Y", "N")))
+```
+<br>
+
+count trips where midtrip removals were returns to Port of Landing
+```{r}
+midtrip_returns_total <-  dcrb_vms_part_rm %>%
+  dplyr::select(Port_Of_Landing, Rec_ID) %>%
+  distinct() %>%
+  mutate(didreturn = ifelse(Rec_ID %in% unique(midtrip_returns$Rec_ID), "Y", "N"))
+count_midtrip_returns_total <- midtrip_returns_total %>%
+  group_by(Port_Of_Landing) %>%
+  summarise(ntrips = sum(didreturn == "Y"), ptrips = ntrips / n())
+```
+<br>
+
+```{r}
+ggplot(count_midtrip_returns_total, aes(x=Port_Of_Landing, y=ntrips)) +
+  geom_col() +
+  ggtitle("Number of Trips that Returned to Port of Landing") +
+  theme(axis.text.x = element_text(angle=90, hjust=1))
+ggplot(count_midtrip_returns_total, aes(x=Port_Of_Landing, y=ptrips)) +
+  geom_col() +
+  ggtitle("Proportion of Trips that Returned to Port of Landing")+
+  theme(axis.text.x = element_text(angle=90, hjust=1))
+```
+<br>
+
+#### Take a look at some of these midtrip returns
+```{r}
+midtrip_returns_vms <-  dcrb_vms %>%
+  filter(Rec_ID %in% unique(midtrip_returns$Rec_ID))
+```
+<br>
+
+```{r}
+plot_ports <- unique(midtrip_returns_vms$Port_Of_Landing)
+for(p in plot_ports){
+  tmp_vms <- filter(midtrip_returns_vms, Port_Of_Landing == p)
+  if(length(unique(tmp_vms$Rec_ID)) > 2){
+    trips_to_keep <- unique(tmp_vms$Rec_ID)[1:3]
+    for(i in trips_to_keep){
+      tmp_dat <- filter(tmp_vms, Rec_ID == i)
+      out_dat <- filter(dcrb_vms_part_rm, Port_Of_Landing == p & Rec_ID == i)
+      label_dat <- rbind(tmp_dat[1,], tmp_dat[length(tmp_dat$Rec_ID),])
+      myplot <- ggplot(tmp_dat) +
+        geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+        geom_point(aes(x=LONGITUDE, y=LATITUDE, col=to_rm), size = 4, alpha = 0.5) + 
+        geom_path(aes(x=LONGITUDE, y=LATITUDE), col="dodgerblue4", size = 0.5, alpha = 0.5) +
+        geom_text(data=label_dat, aes(y = LATITUDE,x=LONGITUDE, label=c("S", "E"))) +
+        geom_point(data=filter(ports_df, as.character(port_code) == as.character(unique(tmp_dat$Port_Of_Landing))), aes(x=Lon, y=Lat), col="red", size=2) +
+        #scale_color_continuous() +
+        ggtitle(paste0("Trip ID:", i, "Port:", tmp_dat$Port_Of_Landing[1])) +
+        coord_cartesian(xlim=c(min(tmp_dat$LONGITUDE) - 0.1, max(tmp_dat$LONGITUDE) + 0.1), ylim=c(min(tmp_dat$LATITUDE) - 0.1, max(tmp_dat$LATITUDE) + 0.1))
+      print(myplot)
+      png(paste0("ProcessVMS/scripts/quality/midtrip_returns/DCRB_VMS_", i, "_Port", tmp_dat$Port_Of_Landing[1], ".png"))
+      print(myplot)
+      dev.off()
+      write.csv(x=out_dat, paste0("ProcessVMS/scripts/quality/midtrip_returns/DCRB_VMS_", i, "_Port", tmp_dat$Port_Of_Landing[1], ".csv"))
+    }
+  } else if(length(unique(tmp_vms$Rec_ID)) > 0){
+    trips_to_keep <- unique(tmp_vms$Rec_ID)
+    for(i in trips_to_keep){
+      tmp_dat <- filter(tmp_vms, Rec_ID == i)
+      out_dat <- filter(dcrb_vms_part_rm, Port_Of_Landing == p & Rec_ID == i)
+      label_dat <- rbind(tmp_dat[1,], tmp_dat[length(tmp_dat$Rec_ID),])
+      myplot <- ggplot(tmp_dat) +
+        geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+        geom_point(aes(x=LONGITUDE, y=LATITUDE, col=to_rm), size = 4, alpha = 0.5) + 
+        geom_path(aes(x=LONGITUDE, y=LATITUDE), col="dodgerblue4", size = 0.5, alpha = 0.5) +
+        geom_text(data=label_dat, aes(y = LATITUDE,x=LONGITUDE, label=c("S", "E"))) +
+        geom_point(data=filter(ports_df, as.character(port_code) == as.character(unique(tmp_dat$Port_Of_Landing))), aes(x=Lon, y=Lat), col="red", size=2) +
+        #scale_color_continuous() +
+        ggtitle(paste0("Trip ID:", i, " Port:", tmp_dat$Port_Of_Landing[1])) +
+        coord_cartesian(xlim=c(min(tmp_dat$LONGITUDE) - 0.1, max(tmp_dat$LONGITUDE) + 0.1), ylim=c(min(tmp_dat$LATITUDE) - 0.1, max(tmp_dat$LATITUDE) + 0.1))
+      print(myplot)
+      png(paste0("ProcessVMS/scripts/quality/midtrip_returns/DCRB_VMS_", i, "_Port", tmp_dat$Port_Of_Landing[1], ".png"))
+      print(myplot)
+      dev.off()
+      write.csv(x=out_dat, paste0("ProcessVMS/scripts/quality/midtrip_returns/DCRB_VMS_", i, "_Port", tmp_dat$Port_Of_Landing[1], ".csv"))
+    }
+  } else{cat("No VMS records for port: ", p, "\n")}
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

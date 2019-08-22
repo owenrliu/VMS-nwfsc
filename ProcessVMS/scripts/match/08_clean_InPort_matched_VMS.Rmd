@@ -1,0 +1,586 @@
+---
+title: "Remove in-port VMS records"
+output: html_document
+---
+
+Date: 12/18/2018
+
+
+The purpose of this script is to flag all "in-port" VMS records, using a buffer zone of 3km / 1.5km. In-port records with an average speed of < 1 are marked for removal. Only those records marked for removal before and after the fishing trip were actually removed from the filtered output data. 
+Original version (12/17/2018) focused only on trips targeting Dungeness crab.
+
+*Version 2: performs filtering using the calculate average speed, rather than the reported average speed.*
+
+
+<br>
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS-repo") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r include=FALSE}
+#install.packages("foreign")
+#install.packages("dplyr")
+#install.packages("tidyr")
+#install.packages("lubridate") #https://rstudio-pubs-static.s3.amazonaws.com/28038_1bcb9aa80ca84f27ace07d612872861a.html
+
+library(foreign)
+library(dplyr)
+library(tidyr)
+library(lubridate) 
+library(ggplot2)
+library(maps)
+library(rgdal)
+library(rgeos)
+```
+<br>
+
+Create Objects / Data Frames
+```{r}
+## directory where Blake's processed VMS data is stored as .dbf files
+origVMS_dir = "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+
+## directory where the filtered VMS data will be written out
+filterVMS_dir = "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+
+## file with port coordinates, including directory
+coords_file = "Input_Data/port_coords_fromBlake_edited.csv"
+
+## calendar years
+years <- c(2011)
+
+## width of buffer circle (in meters). applies to all ports but those that require smaller buffers
+r = 3000
+
+## port codes for any ports that require reduced buffer sizes. Default is only COS
+ports_lowbuffer <- c("COS")
+
+## width of buffer circle (in meters) for COS
+r2 = 1500
+
+## cutoff value for speed (m/s) -- 1m/s ~ 2 knots
+speed_cutoff <- 0.75
+
+## do you want to filter out data points that are potentially on shore (NGDC > 0m)?
+bathy_filter=FALSE
+
+## do you want a ton of plots for quality control?
+plot.me = FALSE
+```
+<br>
+
+### Read in the data
+
+First, the full vms data set
+```{r rawdat}
+vms <- read.csv(paste0(origVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", years[1], "_speed_cleaned.csv"))
+dim(vms)
+head(vms)
+```
+<br>
+
+Then, the coordinates for the ports
+```{r}
+portdat <- read.csv(coords_file)
+if(any(is.na(portdat$lat))==TRUE){
+  message("WARNING: some ports are missing coordinates. ports were removed from data frame.")
+  portdat <- filter(portdat, !is.na(lat))
+}
+port_coords <- portdat
+port_coords_reg <- portdat %>% filter(!(port_code %in% ports_lowbuffer))
+port_coords_sm <- portdat %>% filter(port_code %in% ports_lowbuffer)
+```
+<br>
+
+### Perform optional bathymetry filter
+```{r}
+if(bathy_filter == TRUE){
+  vms <- vms %>%
+    filter(NGDC_M <= 0)
+  vms_removed <- vms %>%
+    filter(NGDC_M > 0)
+  vms_removed$westcoastdate <- ymd_hms(vms_removed$westcoastdate, tz="America/Los_Angeles")
+  for(i in seq(1, length(years))){
+    tmp_dat <- filter(vms_removed, year(westcoastdate) == years[i])
+    write.csv(tmp_dat, paste0(filterVMS_dir, "VMS_Outputs_wTARGET_10d_lookback_", years[i], "_speed_cleaned_bathy_REMOVED.csv", row.names=FALSE))
+  }
+}
+```
+<br>
+
+
+### Prep the port coordinates
+*Note - to assign a project, `proj4string` requires coordinates in xy (lng/lat) order*
+```{r}
+coordinates(port_coords) <- c("Lon", "Lat") 
+proj4string(port_coords) <- CRS("+init=epsg:4326") # WGS 84
+port_coords_geo <- spTransform(port_coords, CRSobj = CRS("+init=epsg:32610"))
+
+coordinates(port_coords_reg) <- c("Lon", "Lat") 
+proj4string(port_coords_reg) <- CRS("+init=epsg:4326") # WGS 84
+port_coords_reg_geo <- spTransform(port_coords_reg, CRSobj = CRS("+init=epsg:32610"))
+
+coordinates(port_coords_sm) <- c("Lon", "Lat") 
+proj4string(port_coords_sm) <- CRS("+init=epsg:4326") # WGS 84
+port_coords_sm_geo <- spTransform(port_coords_sm, CRSobj = CRS("+init=epsg:32610"))
+```
+<br>
+
+### Create buffer
+```{r buffer}
+buffer_polygons_reg <- gBuffer(port_coords_reg_geo, byid=TRUE, width=r)
+buffer_polygons_sm <- gBuffer(port_coords_sm_geo, byid=TRUE, width=r2)
+buffer_polygons  <- rbind(buffer_polygons_reg, buffer_polygons_sm)
+```
+
+
+Get correct input format / coordinate system for ggplot
+```{r}
+ports_df <- data.frame(port_coords)
+buffer_polygons_LL <- spTransform(buffer_polygons, CRSobj = CRS("+init=epsg:4326"))
+plot(buffer_polygons_LL)
+```
+
+Basemap
+```{r}
+data(stateMapEnv)
+states_df <- map_data("state") %>%
+  filter(region == "california" | region=="oregon" | region=="washington")
+```
+
+Plot coastline
+```{r}
+ggplot() +
+  geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+  geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red") +
+  coord_cartesian(xlim=c(-127, -112), ylim=c(32, 49)) +
+  geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+  geom_text(data=ports_df, aes(x=Lon, y=Lat, label=port_code),size=2, nudge_x=-0.51) 
+```
+
+Zoom in to a bay area and a coast area (*this is a crappy background map, so if ports are on land, that's ok.*)
+```{r}
+cutcoast <- list(c(-124, -125, 47.5, 48.5), #upper WA
+                 c(-123.5, -124.5, 46.7, 47.7), #lower WA p1
+                 c(-123.5, -124.5, 45.7, 46.7), #lower WA / upper OR [WLB, NHL]
+                 c(-123.5, -124.5,45.6, 44.6), # OR [TLL, NEW]
+                 c(-123.5, -124.5,44.5, 43.5), # OR [WLD, WIN]
+                 c(-124, -125, 43.5, 42.25), # OR [COS,GLD]
+                 c(-123.75, -124.75, 42.2, 40.5), #OR to CA [BRK, FLN]
+                 c(-123, -124, 40, 38.5), # CA [BRG, ARE]
+                 c(-122, -123.5, 38.5, 36.6), # CA [BDG, CRZ]
+                 c(-120.5, -122, 37, 35), # CA [MOS, AVL]
+                 c(-117, -120, 35, 32.5)) # CA[SB, OCN]
+```
+```{r}
+for(i in seq(1,11)){
+  myplot <- ggplot() +
+    geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+    geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+    geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red", size=2) +
+    coord_cartesian(xlim=c(cutcoast[[i]][1], cutcoast[[i]][2]), ylim=c(cutcoast[[i]][3], cutcoast[[i]][4])) +
+    geom_text(data=ports_df, aes(x=Lon, y=Lat, label=port_code),size=4, nudge_x=-0.07)
+  print(myplot)
+}
+```
+
+Zoom in to a bay area and a coast area WITH VMS POINTS. (*this is a crappy background map, so if ports are on land, that's ok.*)
+```{r}
+if(plot.me){
+  for(i in seq(1:11)){
+    myplot <- ggplot() +
+      geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+      geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+      geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red", size=2) +
+      geom_point(data=vms, aes(x=LONGITUDE, y=LATITUDE), col="green", alpha=0.5) +
+      coord_cartesian(xlim=c(cutcoast[[i]][1], cutcoast[[i]][2]), ylim=c(cutcoast[[i]][3], cutcoast[[i]][4]))
+    print(myplot)
+  }
+} else{
+  for(i in seq(from=1, to=9, by=3)){
+    myplot <- ggplot() +
+      geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+      geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+      geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red", size=2) +
+      geom_point(data=vms, aes(x=LONGITUDE, y=LATITUDE), col="green", alpha=0.5) +
+      coord_cartesian(xlim=c(cutcoast[[i]][1], cutcoast[[i]][2]), ylim=c(cutcoast[[i]][3], cutcoast[[i]][4]))
+    print(myplot)
+  }
+}
+
+```
+<br>
+
+
+### Flag data points
+https://www.nceas.ucsb.edu/scicomp/usecases/point-in-polygon 
+
+First, let's just make sure that our polygon objects are set up correctly. Do this by verifying that all port coordinates are in the correct port polygon buffer. 
+```{r inport_flag}
+port_coords_geo$test_port <- over(port_coords_geo, buffer_polygons)$port_code
+port_coords_geo$port_code[port_coords_geo$port_code != port_coords_geo$test_port]
+port_coords_geo$test_port[port_coords_geo$port_code != port_coords_geo$test_port]
+```
+Some Santa Barbara and LA area ports may overlap buffers >= 3km.
+<br>
+
+
+Assign projection to VMS points
+```{r}
+vms_sp <- vms
+coordinates(vms_sp) <- c("LONGITUDE", "LATITUDE") 
+proj4string(vms_sp) <- CRS("+init=epsg:4326") # WGS 84
+vms_geo <- spTransform(vms_sp, CRSobj = CRS("+init=epsg:32610"))
+```
+<br>
+
+
+Identify data points within buffer zones
+```{r}
+in.port <- over(vms_geo, buffer_polygons)$port_code
+vms <- mutate(vms, in_port = in.port)
+```
+<br>
+
+
+Zoom in to a bay area and a coast area WITH VMS POINTS. (*this is a crappy background map, so if ports are on land, that's ok.*)
+```{r}
+if(plot.me){
+  for(i in seq(1,11)){
+    myplot <- ggplot() +
+      geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+      geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+      geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red", size=2) +
+      geom_point(data=vms, aes(x=LONGITUDE, y=LATITUDE, col=in_port), alpha=0.5) +
+      coord_cartesian(xlim=c(cutcoast[[i]][1], cutcoast[[i]][2]), ylim=c(cutcoast[[i]][3], cutcoast[[i]][4])) +
+      geom_text(data=ports_df, aes(x=Lon, y=Lat, label=port_code),size=4, nudge_x=0.07) 
+    print(myplot)
+  }
+}
+```
+<br>
+
+What is the avg speed when vessels are marked as in port? 
+```{r}
+inport_dat <- mutate(vms, in_port_binary = ifelse(is.na(in_port), 0,1))
+ggplot(data=filter(inport_dat, avg_speed_ms < 50), aes(x=avg_speed_ms)) +
+  geom_histogram() +
+  facet_wrap(~in_port_binary) +
+  xlab("Average Speed (Calculated)") +
+  ylab("Number of Records")
+```
+<br>
+
+Mark "remove" if the record is in port *and* the avg speed is < 1 m/s.
+```{r remove_flag}
+vms <- mutate(vms, to_rm = ifelse(!is.na(in_port) & avg_speed_ms < speed_cutoff, "remove", "retain"))
+cat("Proportion of VMS records removed: ", sum(vms$to_rm == "remove") / dim(vms)[1], "\n")
+cat("There were ", dim(vms)[1]/sum(vms$to_rm == "retain"), "x VMS records in the unfiltered data than will be retained.\n")
+cat("Proportion of VMS records marked in-port removed: ", sum(vms$to_rm == "remove") / sum(!is.na(vms$in_port)))
+```
+<br>
+
+
+### Filtering data
+
+I want to remove all but the last in-port record before the fishing trip, and the first in-port record after the fishing trip. For now, I am leaving in all mid-trip "remove" points. 
+
+To do this, I first need to get the date / time of the first and last "retain" record for each trip. Then, I can split each trip as pre-first "retain" and post-last "retain". Finally, sort by date/timestamp and take the top n=1 VMS record per trip. Add these data back into the output data frame.
+
+Get the `westcoastdate` of the first/last record to retain
+```{r}
+vms$westcoastdate <- ymd_hms(vms$westcoastdate)
+first_last_retain <- vms %>%
+  filter(to_rm == "retain") %>%
+  group_by(Rec_ID) %>%
+  summarise(first_retain = min(westcoastdate, na.rm=TRUE), last_retain = max(westcoastdate, na.rm=TRUE))
+vms_ext <- left_join(vms, first_last_retain, by="Rec_ID")
+```
+<br>
+
+Split "remove" records into pre-trip and post-trip data
+```{r split_remove}
+vms_ext$westcoastdate <- ymd_hms(vms_ext$westcoastdate)
+pretrip_inport <- vms_ext %>%
+  filter(westcoastdate < first_retain) %>%
+  filter(to_rm == "remove")
+posttrip_inport <- vms_ext %>%
+  filter(westcoastdate > last_retain) %>%
+  filter(to_rm == "remove")
+```
+<br>
+
+Sort pre-trip by desc(westcoastdate), grab the top record per trip. Sort post-trip by westcoastdate, grab the top record per trip.
+```{r}
+pretrip_lastvms <- pretrip_inport %>%
+  group_by(Rec_ID) %>%
+  top_n(n=1, wt=westcoastdate)
+posttrip_firstvms <- posttrip_inport %>%
+  group_by(Rec_ID) %>%
+  top_n(n=1, wt=desc(westcoastdate))
+head(pretrip_lastvms %>% dplyr::select(Rec_ID, westcoastdate, to_rm, first_retain))
+head(posttrip_firstvms %>% dplyr::select(Rec_ID, westcoastdate, to_rm, last_retain))
+```
+<br>
+
+Remove records pre-first_retain and post-last_retain
+```{r filter}
+vms_ext_filtered <- vms_ext %>%
+  filter(westcoastdate > first_retain & westcoastdate < last_retain)
+vms_ext_removed <- vms_ext %>%
+  filter(westcoastdate < first_retain | westcoastdate > last_retain)
+```
+<br>
+
+Integrate last pre-trip and first post-trip back into the data set. 
+```{r add_one_inport}
+colnames(vms_ext_filtered) == colnames(pretrip_lastvms)
+colnames(vms_ext_filtered) == colnames(posttrip_firstvms)
+
+vms_out_ext <- vms_ext_filtered %>%
+  bind_rows(pretrip_lastvms) %>%
+  bind_rows(posttrip_firstvms)
+vms_out_ext$westcoastdate <- ymd_hms(vms_out_ext$westcoastdate)
+vms_out_ext <- vms_out_ext %>%
+  arrange(Rec_ID, westcoastdate)
+vms_out <- dplyr::select(vms_out_ext, c(-first_retain, -last_retain))
+```
+<br>
+
+Write out filtered data set, with a separate file for each year
+```{r write_out}
+if(bathy_filter == TRUE){
+  for(y in years){
+    tmp_output <- filter(vms_out, year(westcoastdate) == y)
+    tmp_output$westcoastdate <- as.character(tmp_output$westcoastdate)
+    write.csv(x=tmp_output, paste0(filterVMS_dir, "VMS_Outputs_wTARGET_10d_lookback_", y, "_speed_cleaned_bathy_offshore.csv"), row.names=FALSE)
+    tmp_filteredout <- filter(vms_ext_removed, year(westcoastdate) == y)
+    tmp_filteredout$westcoastdate <- as.character(tmp_filteredout$westcoastdate)
+    write.csv(x=tmp_filteredout, paste0(filterVMS_dir, "VMS_Outputs_wTARGET_10d_lookback_", y, "_speed_cleaned_bathy_inport_removed.csv"), row.names=FALSE)
+  }
+} else{
+  for(y in years){
+    tmp_output <- filter(vms_out, year(westcoastdate) == y)
+    tmp_output$westcoastdate <- as.character(tmp_output$westcoastdate)
+    write.csv(x=tmp_output, paste0(filterVMS_dir, "VMS_Outputs_wTARGET_10d_lookback_", y, "_speed_cleaned_offshore.csv"), row.names=FALSE)
+    tmp_filteredout <- filter(vms_ext_removed, year(westcoastdate) == y)
+    tmp_filteredout$westcoastdate <- as.character(tmp_filteredout$westcoastdate)
+    write.csv(x=tmp_filteredout, paste0(filterVMS_dir, "VMS_Outputs_wTARGET_10d_lookback_", y, "_speed_cleaned_inport_removed.csv"), row.names=FALSE)
+  }
+}
+```
+<br>
+<br>
+
+
+
+_________________________________
+### View flagged points
+
+#### In port, removed
+```{r plot_remove}
+rm_vms <- filter(vms, to_rm=="remove")
+if(plot.me){
+  for(i in seq(1,11)){
+    myplot<- ggplot() +
+      geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+      geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+      geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red", size=2) +
+      geom_point(data=rm_vms, aes(x=LONGITUDE, y=LATITUDE, col=avg_speed_ms), alpha=0.5) +
+      coord_cartesian(xlim=c(cutcoast[[i]][1], cutcoast[[i]][2]), ylim=c(cutcoast[[i]][3], cutcoast[[i]][4])) +
+      geom_text(data=ports_df, aes(x=Lon, y=Lat, label=port_code),size=4, nudge_x=0.07) +
+      ggtitle("Removed VMS Records")
+    print(myplot)
+  }
+} else{
+  for(i in seq(from=1,to=9, by=3)){
+    myplot<- ggplot() +
+      geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+      geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+      geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red", size=2) +
+      geom_point(data=rm_vms, aes(x=LONGITUDE, y=LATITUDE, col=avg_speed_ms), alpha=0.5) +
+      coord_cartesian(xlim=c(cutcoast[[i]][1], cutcoast[[i]][2]), ylim=c(cutcoast[[i]][3], cutcoast[[i]][4])) +
+      geom_text(data=ports_df, aes(x=Lon, y=Lat, label=port_code),size=4, nudge_x=0.07) +
+      ggtitle("Removed VMS Records")
+    print(myplot)
+  }
+}
+```
+<br>
+
+#### In port, retained
+```{r plot_retain}
+retain_vms <- filter(vms, to_rm=="retain" & !is.na(in_port))
+if(plot.me){
+  for(i in seq(1,11)){
+    myplot<- ggplot() +
+      geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+      geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+      geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red", size=2) +
+      geom_point(data=retain_vms, aes(x=LONGITUDE, y=LATITUDE, col=avg_speed_ms), alpha=0.5) +
+      coord_cartesian(xlim=c(cutcoast[[i]][1], cutcoast[[i]][2]), ylim=c(cutcoast[[i]][3], cutcoast[[i]][4])) +
+      geom_text(data=ports_df, aes(x=Lon, y=Lat, label=port_code),size=4, nudge_x=0.07) +
+      ggtitle("Retained In-Port VMS Records")
+    print(myplot)
+  }
+}  else{
+  for(i in seq(from=1,to=9, by=3)){
+    myplot<- ggplot() +
+      geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+      geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+      geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red", size=2) +
+      geom_point(data=rm_vms, aes(x=LONGITUDE, y=LATITUDE, col=avg_speed_ms), alpha=0.5) +
+      coord_cartesian(xlim=c(cutcoast[[i]][1], cutcoast[[i]][2]), ylim=c(cutcoast[[i]][3], cutcoast[[i]][4])) +
+      geom_text(data=ports_df, aes(x=Lon, y=Lat, label=port_code),size=4, nudge_x=0.07) +
+      ggtitle("Removed VMS Records")
+    print(myplot)
+  }
+}
+```
+
+
+
+### Check effects of flagging
+
+#### Have we removed > 99% of records from any trips?
+```{r plot_premove}
+premoved <- vms %>%
+  group_by(Port_Of_Landing, Rec_ID) %>%
+  summarise(p.remove = sum(to_rm=="remove") / n())
+cat("Removed more than 99% of records from ", sum(premoved$p.remove > 0.99) / length(premoved$p.remove) * 100, "% (" , sum(premoved$p.remove > 0.99) , "total) of trips. ")
+ggplot(premoved, aes(x=p.remove)) +
+  geom_histogram() +
+  ggtitle("Across All Ports") 
+if(plot.me){
+  for(p in premoved$Port_Of_Landing){
+    myplot <- ggplot(data=filter(premoved, Port_Of_Landing == p), aes(x=p.remove)) +
+      geom_histogram() +
+      ggtitle(paste0("Port: ", p)) +
+      xlab("Percent VMS records removed per trip") +
+      ggtitle(p)
+    print(myplot)
+  }
+}  else{
+  for(i in seq(from=1,to=9, by=3)){
+    myplot<- ggplot() +
+      geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+      geom_polygon(data=buffer_polygons_LL, aes(x = long, y = lat, group = group), col="blue") +
+      geom_point(data=ports_df, aes(x=Lon, y=Lat), col="red", size=2) +
+      geom_point(data=rm_vms, aes(x=LONGITUDE, y=LATITUDE, col=avg_speed_ms), alpha=0.5) +
+      coord_cartesian(xlim=c(cutcoast[[i]][1], cutcoast[[i]][2]), ylim=c(cutcoast[[i]][3], cutcoast[[i]][4])) +
+      geom_text(data=ports_df, aes(x=Lon, y=Lat, label=port_code),size=4, nudge_x=0.07) +
+      ggtitle("Removed VMS Records")
+    print(myplot)
+  }
+}
+```
+<br>
+
+
+
+#### General viz across ports
+Paths of 2 trips from each port: original data set
+```{r plot_2trips}
+if(plot.me){
+  for(p in unique(vms$Port_Of_Landing)){
+    tmp_port <- dplyr::filter(vms, Port_Of_Landing == p)
+    if(length(unique(tmp_port$Rec_ID)) > 1){
+      for(i in seq(1,2)){
+        tmp_dat <- filter(tmp_port, Rec_ID == unique(tmp_port$Rec_ID)[i])
+        label_dat <- rbind(tmp_dat[1,], tmp_dat[length(tmp_dat$Rec_ID),])
+        myplot <- ggplot(tmp_dat) +
+          geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+          geom_point(aes(x=LONGITUDE, y=LATITUDE, col=to_rm), size = 4, alpha = 0.5) + 
+          geom_path(aes(x=LONGITUDE, y=LATITUDE), col="dodgerblue4", size = 0.5, alpha = 0.5) +
+          geom_text(data=label_dat, aes(y = LATITUDE,x=LONGITUDE, label=c("S", "E"))) +
+          geom_point(data=filter(ports_df, as.character(port_code) == as.character(unique(tmp_dat$Port_Of_Landing))), aes(x=Lon, y=Lat), col="red", size=2) +
+          #scale_color_continuous() +
+          ggtitle(paste0("Trip ID:", i, "Port:", tmp_dat$Port_Of_Landing[1])) +
+          coord_cartesian(xlim=c(min(tmp_dat$LONGITUDE) - 0.1, max(tmp_dat$LONGITUDE) + 0.1), ylim=c(min(tmp_dat$LATITUDE) - 0.1, max(tmp_dat$LATITUDE) + 0.1))
+        png(paste0("ProcessVMS/R_Output/quality/buffer_zones/",years[1], "/", p, "_Rec", unique(tmp_dat$Rec_ID), ".png"))
+        print(myplot)
+        dev.off()
+      }
+    }
+    else{
+      tmp_dat <- tmp_port
+      label_dat <- rbind(tmp_dat[1,], tmp_dat[length(tmp_dat$Rec_ID),])
+      myplot <- ggplot(tmp_dat) +
+        geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+        geom_point(aes(x=LONGITUDE, y=LATITUDE, col=to_rm), size = 4, alpha = 0.5) + 
+        geom_path(aes(x=LONGITUDE, y=LATITUDE), col="dodgerblue4", size = 0.5, alpha = 0.5) +
+        geom_text(data=label_dat, aes(y = LATITUDE,x=LONGITUDE, label=c("S", "E"))) +
+        geom_point(data=filter(ports_df, as.character(port_code) == as.character(unique(tmp_dat$Port_Of_Landing))), aes(x=Lon, y=Lat), col="red", size=2) +
+        #scale_color_continuous() +
+        ggtitle(paste0("Trip ID:", i, "Port:", tmp_dat$Port_Of_Landing[1])) +
+        coord_cartesian(xlim=c(min(tmp_dat$LONGITUDE) - 0.1, max(tmp_dat$LONGITUDE) + 0.1), ylim=c(min(tmp_dat$LATITUDE) - 0.1, max(tmp_dat$LATITUDE) + 0.1))
+      png(paste0("ProcessVMS/R_Output/quality/buffer_zones/",years[1], "/", p, "_Rec", unique(tmp_dat$Rec_ID), ".png"))
+      print(myplot)
+      dev.off()
+    }
+  }
+}
+```
+
+
+
+
+Paths of 2 trips from each port: newly filtered data set
+```{r plot_2trips_new}
+if(plot.me){
+  for(p in unique(vms_out$Port_Of_Landing)){
+    tmp_port <- dplyr::filter(vms_out, Port_Of_Landing == p)
+    if(length(unique(tmp_port$Rec_ID)) > 1){
+      for(i in seq(1,2)){
+        tmp_dat <- filter(tmp_port, Rec_ID == unique(tmp_port$Rec_ID)[i])
+        label_dat <- rbind(tmp_dat[1,], tmp_dat[length(tmp_dat$Rec_ID),])
+        myplot <- ggplot(tmp_dat) +
+          geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+          geom_point(aes(x=LONGITUDE, y=LATITUDE, col=to_rm), size = 4, alpha = 0.5) + 
+          geom_path(aes(x=LONGITUDE, y=LATITUDE), col="dodgerblue4", size = 0.5, alpha = 0.5) +
+          geom_text(data=label_dat, aes(y = LATITUDE,x=LONGITUDE, label=c("S", "E"))) +
+          geom_point(data=filter(ports_df, as.character(port_code) == as.character(unique(tmp_dat$Port_Of_Landing))), aes(x=Lon, y=Lat), col="red", size=2) +
+          #scale_color_continuous() +
+          ggtitle(paste0("Trip ID:", i, "Port:", tmp_dat$Port_Of_Landing[1])) +
+          coord_cartesian(xlim=c(min(tmp_dat$LONGITUDE) - 0.1, max(tmp_dat$LONGITUDE) + 0.1), ylim=c(min(tmp_dat$LATITUDE) - 0.1, max(tmp_dat$LATITUDE) + 0.1))
+        png(paste0("ProcessVMS/R_Output/quality/buffer_zones/", years[1], "/filter_", p, "_Rec", unique(tmp_dat$Rec_ID), ".png"))
+        print(myplot)
+        dev.off()
+      }
+    }
+    else{
+      tmp_dat <- tmp_port
+      label_dat <- rbind(tmp_dat[1,], tmp_dat[length(tmp_dat$Rec_ID),])
+      myplot <- ggplot(tmp_dat) +
+        geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+        geom_point(aes(x=LONGITUDE, y=LATITUDE, col=to_rm), size = 4, alpha = 0.5) + 
+        geom_path(aes(x=LONGITUDE, y=LATITUDE), col="dodgerblue4", size = 0.5, alpha = 0.5) +
+        geom_text(data=label_dat, aes(y = LATITUDE,x=LONGITUDE, label=c("S", "E"))) +
+        geom_point(data=filter(ports_df, as.character(port_code) == as.character(unique(tmp_dat$Port_Of_Landing))), aes(x=Lon, y=Lat), col="red", size=2) +
+        #scale_color_continuous() +
+        ggtitle(paste0("Trip ID:", i, "Port:", tmp_dat$Port_Of_Landing[1])) +
+        coord_cartesian(xlim=c(min(tmp_dat$LONGITUDE) - 0.1, max(tmp_dat$LONGITUDE) + 0.1), ylim=c(min(tmp_dat$LATITUDE) - 0.1, max(tmp_dat$LATITUDE) + 0.1))
+      png(paste0("ProcessVMS/R_Output/quality/buffer_zones/", years[1], "/filter_", p, "_Rec", unique(tmp_dat$Rec_ID), ".png"))
+      print(myplot)
+      dev.off()
+    }
+  }
+}
+```
+
+
+
+
+
+
+
+

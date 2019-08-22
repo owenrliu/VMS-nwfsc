@@ -1,0 +1,143 @@
+---
+title: "Calculate Average Speed with Interpolated Data"
+output: html_document
+---
+
+<br>
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS-repo") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r include=FALSE}
+library(dplyr)
+library(tidyr)
+library(lubridate) 
+library(ggplot2)
+library(move)
+library(rgdal)
+```
+<br>
+
+Create Objects / Data Frames
+```{r}
+## directory where filtered VMS data is stored as .csv file
+VMS_dir = "ProcessVMS/R_Output/interpolation/"
+
+## calendar years
+y <- 2011
+
+## recalculate the average speed?
+all = FALSE
+regular=TRUE
+```
+<br>
+
+First, the full vms data set
+```{r rawdat}
+vms_all <- read.csv(paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_final_cleaned_interpolated_all.csv"))
+vms_regular <- read.csv(paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_final_cleaned_interpolated_regular.csv"))
+```
+<br>
+
+```{r}
+if(all){
+  start.time <- Sys.time()
+  # arrange data
+  vms_all$UTCDATETIM <- parse_date_time(vms_all$UTCDATETIM, orders =c("ymd_HM","mdy_HM","ymd_HMS","mdy_HMS"), tz="UTC")
+  vms_all$DECLARATIO[vms_all$DECLARATIO == "N/A"] <- NA
+  vms_all <- vms_all %>% arrange(Rec_ID, UTCDATETIM)
+  # convert to movestack
+  movedat <- move(x=vms_all$X_COORD,
+                  y=vms_all$Y_COORD,
+                  time=vms_all$UTCDATETIM,
+                  data=vms_all,
+                  proj=sp::CRS("+proj=utm +north +zone=10 +ellps=WGS84"),
+                  animal=vms_all$Rec_ID)
+  message("created MoveStack object")
+  # calculate time and distance between records
+  timestep <- timeLag(movedat, units="secs")
+  diststep <- distance(movedat)
+  movedat$dt <- unlist(lapply(timestep, c, NA))
+  movedat$dx <- unlist(lapply(diststep , c, NA))
+  message("calculated distance and time steps.")
+  # turn back into data frame
+  vms_all_move <- as.data.frame(movedat)
+  vms_all_move <- vms_all_move %>%
+    dplyr::select(c(Rec_ID, X_COORD, Y_COORD, UTCDATETIM, dt, dx)) %>%
+    arrange(Rec_ID, UTCDATETIM)
+  # calculate new average speed
+  vms_all_move <- vms_all_move %>%
+    mutate(avg_speed_recalc = dx/dt)
+  # join average speeds back to data frame
+  vms_all_move$Rec_ID  <- as.character(vms_all_move$Rec_ID)
+  vms_all$Rec_ID <- as.character(vms_all$Rec_ID)
+  vms_all <- left_join(vms_all, vms_all_move, by=c("Rec_ID", "UTCDATETIM", "X_COORD", "Y_COORD"))
+  message("added average speeds to data frame.")
+  Sys.time() - start.time
+}
+```
+<br>
+
+```{r}
+if(regular){
+  start.time <- Sys.time()
+  # arrange data
+  vms_regular$UTCDATETIM <- parse_date_time(vms_regular$UTCDATETIM, orders =c("ymd_HM","mdy_HM","ymd_HMS","mdy_HMS"), tz="UTC")
+  vms_regular$DECLARATIO[vms_regular$DECLARATIO == "N/A"] <- NA
+  vms_regular <- vms_regular %>% arrange(Rec_ID, UTCDATETIM)
+  # check for duplicates
+  
+  # convert to movestack
+  movedat <- move(x=vms_regular$X_COORD,
+                  y=vms_regular$Y_COORD,
+                  time=vms_regular$UTCDATETIM,
+                  data=vms_regular,
+                  proj=sp::CRS("+proj=utm +north +zone=10 +ellps=WGS84"),
+                  animal=vms_regular$Rec_ID)
+  message("created MoveStack object")
+  # calculate time and distance between records
+  timestep <- timeLag(movedat, units="secs")
+  diststep <- distance(movedat)
+  message("calculated distance and time steps.")
+  movedat$dt <- unlist(lapply(timestep, c, NA))
+  movedat$dx <- unlist(lapply(diststep , c, NA))
+  # turn back into data frame
+  vms_reg_move <- as.data.frame(movedat)
+  vms_reg_move <- vms_reg_move %>%
+    dplyr::select(c(Rec_ID, X_COORD, Y_COORD, UTCDATETIM, dt, dx)) %>%
+    arrange(Rec_ID, UTCDATETIM)
+  # calculate new average speed
+  vms_reg_move <- vms_reg_move %>%
+    mutate(avg_speed_recalc = dx/dt)
+  # join average speeds back to data frame
+  vms_reg_move$Rec_ID  <- as.character(vms_reg_move$Rec_ID)
+  vms_regular$Rec_ID <- as.character(vms_regular$Rec_ID)
+  vms_regular <- left_join(vms_regular, vms_reg_move, by=c("Rec_ID", "UTCDATETIM", "X_COORD", "Y_COORD"))
+  message("added average speeds to data frame.")
+  Sys.time() - start.time
+}
+```
+
+
+Write out
+```{r}
+if(all){
+  write.csv(vms_all, paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_final_cleaned_interpolated_all.csv"), row.names=FALSE)
+}
+if(regular){
+  write.csv(vms_regular,paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_final_cleaned_interpolated_regular.csv"),row.names=FALSE)
+}
+```
+<br>
+
+

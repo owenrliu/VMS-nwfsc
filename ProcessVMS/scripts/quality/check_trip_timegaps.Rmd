@@ -1,0 +1,454 @@
+---
+title: "Check 24HR Gap Outliers"
+output: html_document
+---
+
+
+
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS_RAship") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r}
+library(lubridate)
+library(ggmap)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+```
+```{r}
+fishtixdir <- "R_Output/FishTix_VMS_Match_v2/v2.0/"
+years <- seq(2009,2016)
+seasons <- c("09-10", "10-11", "11-12", "12-13", "13-14", "14-15","15-16")
+size_cutoff <- 40
+states <- c("C")
+targets <- c("DCRB")
+```
+
+<br>
+
+## Make `ltraj` object
+### Read in data
+
+```{r}
+years = seq(2009,2016)
+vms_out <- read.csv(paste0("R_Output/FishTix_VMS_Match_v2/v2.0/cleaned_vms_portDist/VMS_Outputs_wTARGET_10d_lookback_",years[1],"_cleaned.csv"))
+
+if(length(years) > 1){
+  for(i in seq(2,length(years))){
+    vms_out_tmp <- read.csv(paste0("R_Output/FishTix_VMS_Match_v2/v2.0/cleaned_vms_portDist/VMS_Outputs_wTARGET_10d_lookback_",years[i],"_cleaned.csv"))
+    vms_out <- rbind(vms_out, vms_out_tmp)
+  }
+}
+
+dim(vms_out)
+vmsdat <- vms_out
+```
+
+
+Then the associated fish ticket data
+```{r}
+fishtix <- read.csv(paste0(fishtixdir,"FishTix_wVMS_10d_lookback_",years[1],".csv"))
+fishtix$date <- date(parse_date_time(fishtix$date, orders=c("Ymd", "mdY")))
+
+if(length(years) > 1){
+  for(i in seq(2,length(years))){
+    fishtix_tmp <- read.csv(paste0(fishtixdir,"FishTix_wVMS_10d_lookback_",years[i],".csv"))
+    fishtix_tmp$date <- date(parse_date_time(fishtix_tmp$date, orders=c("Ymd", "mdY")))
+    fishtix <- rbind(fishtix, fishtix_tmp)
+  }
+}
+```
+<br>
+
+
+
+### Prep VMS data
+
+Match vessel lengths / agency code to VMS records
+```{r join_raw}
+vmsdat$DOCNUM <- as.character(vmsdat$DOCNUM)
+fishtix$drvid <- as.character(fishtix$drvid)
+vms_w_landings <- left_join(vmsdat, fishtix, by=c("Rec_ID" = "Rec_ID", "DOCNUM" = "drvid"))
+```
+```{r thin_vms}
+cols_to_keep <- c("Rec_ID","UTCDATETIM", "LATITUDE", "LONGITUDE", "AVG_SPEED", "AVG_COURSE", "DOCNUM", "DECLARATIO", "NGDC_M", "X_COORD", "Y_COORD", "VMS_RECNO", 
+                  "westcoastdate", "date","Week", "year_Wk", "year",
+                  "TARGET_max", "Port_Of_Landing", "port_group_code",
+                  "VMS_lookback_pres",
+                  "agency_code","FINAL_LENGTH", "HISTORIC_DATA")
+vms_w_landings_thin <- select(vms_w_landings, cols_to_keep)
+```
+<br>
+
+#### Filter for only those fish tickets from the state(s) and with the target species that you want to look at
+```{r}
+vms_w_landings_thin_filtered <- filter(vms_w_landings_thin, agency_code %in% states & TARGET_max %in% targets)
+```
+```{r}
+unique(vms_w_landings_thin_filtered$agency_code)
+unique(vms_w_landings_thin_filtered$TARGET_max)
+```
+<br>
+
+Add in vessel category, season, and period columns
+```{r mutate_size_season}
+vmsdat2 <- vms_w_landings_thin_filtered %>%
+  mutate(vessel_cat = ifelse(FINAL_LENGTH > size_cutoff, "Large", "Small")) %>%
+  mutate(season = ifelse((year == 2009 & Week < 46), "08-09",
+                         ifelse((year==2009 & Week > 45) | (year==2010 & Week < 46), "09-10", 
+                            ifelse((year==2010 & Week > 45) | (year==2011 & Week < 46), "10-11",
+                                  ifelse((year==2011 & Week > 45) | (year==2012 & Week < 46), "11-12",
+                                         ifelse((year==2012 & Week > 45) | (year==2013 & Week < 46), "12-13",
+                                                ifelse((year==2013 & Week > 45) | (year==2014 & Week < 46), "13-14",
+                                                       ifelse((year==2014 & Week > 45) | (year==2015 & Week < 46), "14-15",
+                                                              ifelse((year==2015 & Week > 45) | (year==2016 & Week < 46), "15-16",
+                                                                     ifelse((year==2016 & Week > 45) | (year==2017 & Week < 46), "16-17",NA)))))))))) %>%
+  mutate(period = ifelse(season == "15-16", "A1",
+                         ifelse(season == "16-17", "A2", "Before")))
+```
+<br>
+
+#### Filter for fish tickets filled out within the season start/end dates
+
+function to determine whether a given fish ticket was recorded in or outside of CA DCRB fishing seasons.
+```{r}
+within_season <- function(mydates, port_groups){
+  output_vec <- c()
+  groupA <- c("CCA", "ERA", "BGA")
+  groupB <- c("BDA", "SFA", "MNA", "MRA", "SBA", "SDA", "LAA")
+  for(i in seq(1, length(mydates))){
+    tmp_date <- mydates[i]
+    tmp_year <- year(tmp_date)
+    tmp_group <- port_groups[i]
+    if(month(tmp_date) < 8){
+      start_yr <- tmp_year - 1
+      end_yr <- tmp_year}
+    else{
+      start_yr <- tmp_year
+      end_yr <- tmp_year + 1
+    }
+    if(tmp_group %in% groupA){
+      start_date <- ymd(paste0(start_yr, "-12-01"))
+      end_date <- ymd(paste0(end_yr, "-07-15"))
+      if((start_date < tmp_date) == TRUE & (tmp_date < end_date) == TRUE){
+        output <- "Y"} else{ output <- "N"}
+    } else if(tmp_group %in% groupB){
+      start_date <- ymd(paste0(start_yr, "-11-15"))
+      end_date <- ymd(paste0(end_yr, "-06-30"))
+      if((start_date <= tmp_date) == TRUE & (tmp_date <= end_date) == TRUE){
+        output <- "Y"} else{ output <- "N"}
+    } else{
+      print("port group not recognized")
+      output <- NA
+    }
+    output_vec[i] <- output
+  }
+  return(output_vec)
+}
+```
+<br>
+
+Add a new column that says whether the VMS record is associated with a fish ticket that was within or outside of normal season dates
+```{r}
+vmsdat2 <- vmsdat2 %>%
+  mutate(in_season = ifelse(within_season(date, port_group_code) == "Y", "Yes", "No"))
+```
+<br>
+
+
+
+**Filter for desired seasons / records within season dates**
+```{r}
+vmsdat2_seasonFilter <- vmsdat2 %>%
+  filter(season %in% seasons) %>%
+  filter(in_season == "Yes") %>%
+  arrange(desc(westcoastdate))
+```
+```{r}
+dim(vmsdat2_seasonFilter)[1] / dim(vmsdat2)[1] 
+```
+<br>
+
+
+
+
+
+#### Does one vessel have two size classifications in the same season? 
+```{r}
+vessel_categories <- vmsdat2_seasonFilter %>%
+  select(DOCNUM, season, vessel_cat) %>%
+  distinct() %>%
+  group_by(DOCNUM, season) %>%
+  summarise(num_cats = n())
+```
+<br>
+
+If there are one or more vessels that have two size classifications in the same season...
+```{r}
+if(sum(vessel_categories$num_cats == 2) > 0){
+  ## Find the data for the vessel(s) that have different size categories for the same season. What are the different lengths?
+  tmp_vessels <- vessel_categories[which(vessel_categories$num_cats==2),]
+  tmp_vessels_info <- left_join(tmp_vessels, vmsdat2_seasonFilter, by=c("DOCNUM", "season"))
+  tmp_vessels_info %>% select(DOCNUM, season, FINAL_LENGTH) %>% distinct
+  
+  ## get the number of tickets per vessel category within each season
+  tmp_vessels_tickets_per_cat <- tmp_vessels_info %>%
+  group_by(DOCNUM, season, vessel_cat) %>%
+    summarise(n_per_cat = length(unique(Rec_ID)))
+  tmp_vessels_tickets_per_cat
+  
+  ## plot it
+  myplot <- ggplot(tmp_vessels_tickets_per_cat, aes(x=DOCNUM, y=n_per_cat)) +
+    geom_col(aes(fill=vessel_cat)) +
+    facet_wrap(~season) +
+    ylab("Number of Trips per Category")
+  print(myplot)
+  
+  ## pull out the maximum number of tickets recorded
+  max_tickets_per_cat <- tmp_vessels_tickets_per_cat %>%
+    group_by(DOCNUM) %>%
+    filter(n_per_cat == max(n_per_cat))
+  
+  ## reassign vessel category for each vessel
+  for(i in seq(1:length(max_tickets_per_cat$DOCNUM))){
+    tmp_vessel <- max_tickets_per_cat[i,]
+    tmp_docnum <- tmp_vessel$DOCNUM
+    tmp_season <- tmp_vessel$season
+    cat("Reassigned vessel category (as ", tmp_vessel$vessel_cat, ") to vessel", tmp_docnum, " for season", tmp_season, "\n")
+    vmsdat2_seasonFilter$vessel_cat[which(vmsdat2_seasonFilter$DOCNUM == tmp_docnum & vmsdat2_seasonFilter$season == tmp_season)] <- tmp_vessel$vessel_cat
+  }
+  
+  
+  ## did it work?
+  reassigned_vessels <- vmsdat2_seasonFilter %>%
+    filter(DOCNUM %in% tmp_vessels_tickets_per_cat$DOCNUM & season %in% tmp_vessels_tickets_per_cat$season) %>%
+    select(DOCNUM, season, FINAL_LENGTH, vessel_cat) %>%
+    distinct() %>%
+    arrange(DOCNUM)
+  reassigned_vessels
+} else{
+  print("No vessels assigned to different length categories within the same season!")
+}
+```
+<br>
+
+
+
+### Create data frame for `as.ltraj` function, with trip as "id"
+
+#### Ensure that R recognises the timestamp as a POSIXct class
+```{r}
+vmsdat2_seasonFilter$westcoastdate <- ymd_hms(vmsdat2_seasonFilter$westcoastdate, tz= "America/Los_Angeles")
+class(vmsdat2_seasonFilter$westcoastdate)
+vmsdat2_seasonFilter$westcoastdate <- ymd_hms(vmsdat2_seasonFilter$westcoastdate, tz= "America/Los_Angeles")
+class(vmsdat2_seasonFilter$westcoastdate)
+```
+<br>
+
+
+#### Deal with duplicates
+Remove all rows where "VMS_lookback_pres" is recorded as "Duplicated". *These Rec_IDs will be duplicates, so will return an error when creating an ltraj object*.
+```{r}
+dim(vmsdat2_seasonFilter)
+vmsdat2_seasonFilter_nodup1 <- filter(vmsdat2_seasonFilter, VMS_lookback_pres != "Duplicated")
+dim(vmsdat2_seasonFilter_nodup1)
+cat("Proportion of VMS records removed due to duplicated fish tickets:", 1-dim(vmsdat2_seasonFilter_nodup1)[1]/dim(vmsdat2_seasonFilter)[1])
+```
+<br>
+
+Ensure that there are no more duplicated dates under the same Rec_ID
+```{r}
+dim(vmsdat2_seasonFilter_nodup1)
+vmsdat2_seasonFilter_nodup <- vmsdat2_seasonFilter_nodup1[!duplicated(vmsdat2_seasonFilter_nodup1[,c("Rec_ID","westcoastdate", "UTCDATETIM")]),]
+dim(vmsdat2_seasonFilter_nodup)
+
+cat("Proportion of VMS records removed for being true duplicate records:", 1-dim(vmsdat2_seasonFilter_nodup)[1]/dim(vmsdat2_seasonFilter_nodup1)[1])
+```
+<br>
+
+
+
+#### Write file for use in future
+Create a file with the input data frame for the `as.ltraj` function.
+```{r}
+write.csv(x=vmsdat2_seasonFilter_nodup, "R_Output/FishTix_VMS_Match_v2/cleaned_vms/VMSdat_for_ltraj_2009-16_CA_targetDCRB_inseason_SeasonWeek_all_perTrip.csv", row.names=FALSE, quote = FALSE)
+```
+<br>
+
+
+
+
+### Create `ltraj` object, with trip as "id"
+Load package (note-loading package in the beginning of the script will mask "id" variable from dplyr.)
+```{r}
+library(adehabitatLT)
+library(dplyr)
+```
+
+```{r}
+vmsdat2_seasonFilter_nodup$DECLARATIO[vmsdat2_seasonFilter_nodup$DECLARATIO == "N/A"] <- NA
+colnames(vmsdat2_seasonFilter_nodup)
+```
+<br>
+
+
+Create an `ltraj` object
+```{r}
+ltraj <- adehabitatLT::as.ltraj(xy=vmsdat2_seasonFilter_nodup[,c("X_COORD","Y_COORD")], 
+                date=vmsdat2_seasonFilter_nodup$westcoastdate, 
+                id=vmsdat2_seasonFilter_nodup$Rec_ID,
+                infolocs = vmsdat2_seasonFilter_nodup[,c("DOCNUM",
+                                        "vessel_cat", "season", "period",
+                                        "westcoastdate", "VMS_RECNO", "port_group_code",
+                                        "year", "date")])
+```
+<br>
+
+
+Turn it back into a data frame
+```{r}
+vmsdat_ltraj_expanded <- ld(ltraj)
+```
+
+<br>
+
+Edit the column names for the fish ticket `date`
+```{r}
+colnames(vmsdat_ltraj_expanded)[length(colnames((vmsdat_ltraj_expanded)))] <- "ticket_date"
+colnames(vmsdat_ltraj_expanded)[which(colnames(vmsdat_ltraj_expanded) == "date.x")] <- "date"
+```
+<br>
+
+Write out `ltraj` data frame.
+```{r}
+write.csv(vmsdat_ltraj_expanded, "scripts/final_vms/time_gaps/VMSdat_cleaned_ltraj_2009-16_CA_targetDCRB_perTrip.csv", row.names=FALSE)
+```
+<br>
+
+
+
+
+
+
+### Identify outliers based on 24hr gaps
+
+Find the maximum dt between VMS points
+```{r}
+tripdat <- vmsdat_ltraj %>%
+  group_by(id, port_group_code, period) %>%
+  summarise(max_dt = max(dt, na.rm=TRUE)/3600)
+head(tripdat)
+```
+
+
+```{r}
+tripdat_before <- tripdat %>%
+  filter(period == "Before") %>%
+  filter(!is.na(max_dt) & max_dt != 0) %>%
+  select(-period)
+tripdat_a1 <- tripdat %>%
+  filter(period == "A1") %>%
+  filter(!is.na(max_dt) & max_dt != 0) %>%
+  select(-period)
+```
+
+boxplots
+```{r}
+tripdat_before_melt <- melt(tripdat_before, id.vars = c("id", "port_group_code"), measure.vars = c("max_dt"))
+ggplot(tripdat_before_melt, aes(x=variable, y=value)) +
+  geom_boxplot() +
+  facet_wrap(~port_group_code) +
+  ylab("Maximum time diff. between VMS (hrs)") +
+  xlab("port group code") +
+  ggtitle("pre-2015")
+```
+
+
+```{r}
+tripdat_a1_melt <- melt(tripdat_a1, id.vars = c("id", "port_group_code"), measure.vars = c("max_dt"))
+ggplot(tripdat_a1_melt, aes(x=variable, y=value)) +
+  geom_boxplot() +
+  facet_wrap(~port_group_code) +
+  ylab("Maximum time diff. between VMS (hrs)")+
+  xlab("port group code") +
+  ggtitle("2015-16")
+```
+
+
+
+
+
+### Identify dt > 24 hours
+
+
+Get the trip IDs for the outliers
+```{r}
+outliers_df <- tripdat_before %>%
+  filter(max_dt > 72)
+
+outliers_before <- left_join(outliers_df, vms_out, by=c("id"="Rec_ID"))
+```
+
+```{r}
+outliers_df <- tripdat_a1 %>%
+  filter(max_dt > 72)
+
+outliers_a1 <- left_join(outliers_df, vms_out, by=c("id"="Rec_ID"))
+```
+
+```{r}
+dim(outliers_a1 %>% select(id, port_group_code) %>% distinct()) #140
+dim(tripdat_a1%>% select(id, port_group_code) %>% distinct()) #1291
+dim(outliers_before %>%select(id, port_group_code) %>% distinct()) #1519
+dim(tripdat_before %>% select(id, port_group_code) %>% distinct()) #12707
+```
+
+### plot the trips with outliers
+
+```{r}
+library(maps)
+library(maptools)
+library(ggrepel)
+library(ggplot2)
+
+
+
+USA <- map_data("world") %>% 
+  filter(region=="USA")
+states <- map_data("state")
+west_coast <- subset(states, region %in% c("california", "oregon", "washington"))
+
+library(RColorBrewer)
+for(i in unique(outliers_a1$id)){
+  tmp_dat <- dplyr::filter(outliers_a1, id==i)
+  myplot <- ggplot() +
+    geom_polygon(data = states, aes(x=long, y = lat, fill=region, group=group), color=" grey37", alpha=0.3) +
+    guides(fill=FALSE)+
+    geom_point(data=tmp_dat, aes(x=LONGITUDE, y=LATITUDE, col=westcoastdate_notime), size = 2, alpha = 0.5) + 
+    scale_color_brewer(palette="Blues") +
+    ggtitle(paste0("Trip ID:", i)) +
+    coord_map(xlim= c(-115, -135),  ylim = c(30,45))
+  print(myplot)
+  png(paste0("scripts/final_vms/time_gaps/Dt72hr_A1_VMStracks_", i, ".png"))
+  print(myplot)
+  dev.off()
+}
+
+```
+
+
+
+
+
+

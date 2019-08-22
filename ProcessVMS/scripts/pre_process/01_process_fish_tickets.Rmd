@@ -1,0 +1,904 @@
+---
+title: "Pre-Processed_Fish_Tickets_for_VMS_match"
+output: html_document
+---
+Date written: 11/1/2018
+Based on v3 of processing code written for DCRB VMS data.
+By: M. Fisher
+
+
+### Purpose
+This document pre-processes fish tickets from PacFIN for the match_VMS_fishtix code. Version 4 includes a column that strings together all species codes listed on the fish ticket, regardless of contribution to total catch. **Before running this code, ensure that all objects / parameters are set correctly in the code blocks `objects` and `filter_params`**
+
+A few key aspects of the processing code: 
+
+1. You can filter out fish tickets with less than a minimum exvessel revenue or landed pounds. This could help remove personal catch, or catch used for monitoring purposes (like domoic acid testing for Dungeness crab). This only removes fish tickets based on total exvessel revenue or total landed pounds, not species-specific minimums.
+
+2. When calculating species-specific landed pounds and exvessel revenue as separate columns, the code provides several options. It is possible to leave in all species listed on the fish ticket, which would create a different column for each species (around 300; *not recommended*). You can also select for species which you are particularly interested in. These species will each get their own column, and all other species will be grouped into "other". If you want to break down the "other" category by gear type (i.e. other species caught by pot or trap gear, as is default here), then you can specify gear types in the `gear types` vector. Your choice of which species to highlight for this section *will not* impact the calculations of target species. In addition to reporting landed pounds and revenue for pre-determined species, you can also have a dynamic column that reports the same information for the target species of that trip. 
+
+3. Target species can be calculated in one of two ways: "cetacean" option or "multispecies" option. The "cetacean" option refers to the cetacean entanglement project for the Dungeness crab fishery, and so target species will be identified in a set of rules as one of the following: DCRB, SABL, LOBS, SPRW, OTHER_POT, OTHER. With this option. The "multispecies" option will determine a target species as the maximum landed pounds / exvessel revenue across all possible species caught. A target species will only be identified *if the target's landed pounds / exvessel revenue are more than 10% greater than the next greatest value*. Otherwise, the target will be set to "none". You will need to choose whether you want the "multispecies" option to be calculated using landed pounds v. exvessel revenue.
+
+4. All gear types listed for a specific trip are combined into the columns `gear_names_all` and `gear_codes_all`, separated by a "/". This prevents retention of duplicate fish tickets, but allows for later filtering. 
+
+5. If you want to reorder the columns in the data frame before writing it out, this can be done in the second to last code chunk, labeled (reorder_dataframe)
+
+6. The code filters out any fish tickets with missing vessel identifiers (VESSEL_NUM)
+
+*Changes for v4.1: includes the dynamic exvessel revenue / landed pounds column for the target species. more efficient calculations of species-specific revenue/landed lbs. moved up filtering code chunk.*
+
+*Changes for v4.2: preserves an adjusted version of the pacfin gear group (MSC split into DVG for diving, USP for unknown / unspecified, and FRM for Farm) in the final processed fish tickets.*
+<br>
+
+Set Root Directory (for rest of script)
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "E:/Networks/Participation_Networks/") 
+```
+
+
+### Prepare workspace
+Clear workspace
+```{r}
+rm(list=ls())
+```
+
+
+Install packages
+```{r}
+library(foreign)
+library(qdapTools)
+library(lubridate)
+library(ggplot2)
+library(reshape2)
+library(janitor)
+library(stringr)
+library(tidyr)
+library(dplyr)
+```
+
+Choose directories and set objects
+```{r objects}
+## input directory containing raw pacfin data. must include '/' at end
+rawdir <- "input_data/"
+
+## output directory for processed fish tickets. must include '/' at end
+processdir <- "input_data/processed/"
+
+## name of the raw data file
+myfile = "2006_2016_compFT.csv"
+
+## which years of fish tickets are you interested in?
+years = 2010
+
+## which species-specific revenue and lbs columns would you like? (static)
+species_cols <- c("DCRB", "SABL", "LOBS", "SPRW") 
+
+## do you want to report revenue and lbs for the given target species? (dynamic)
+include_target <- TRUE
+
+## calculate an "other" category according to a certain gear type? If so, which gear?
+gear_types <- c("FISH POT","FISH TRAP", "BOTTOMFISH POT", "TRAPS, 
+                SEATTLE TYPE (SABLEFISH)", "PRAWN TRAP", "SHELLFISH POT (NON-CRAB)")
+
+## which type of "target" calculations would you like? Note that you can only use ONE, otherwise the first will be overwritten.
+target_type <- "multispecies"
+# target_type <- "cetacean"
+
+## if you selected "general" as the target calculation above, would you like "target" based on exvessel revenue or landed lbs?
+target_metric <- "lbs" 
+#target_metric <- "revenue"
+
+## pot gear -- this is for cetacean target calculations. it won't be used if you don't choose the target type as "cetacean"
+trap_pot_gear <- c("CRAB RING","BOTTOMFISH POT","CRAB OR LOBSTER POT","CRAB POT","FISH POT","FISH TRAP","PRAWN TRAP","SHELLFISH POT (CRAB)","SHELLFISH POT (NON-CRAB)","TRAPS, SEATTLE TYPE (SABLEFISH)")
+```
+
+
+
+Set filtering-related objects
+
+*part of the fish ticket processing adds columns to the output which specify the total amount and proportion of lbs / revenue attributed to certain species. all other species will be collapsed into an "other" column. use the following filtering options to select which species to retain. to leave in all species data, select `filter_type` = c("none"). Note that this will not affect which species are used to determine TARGET for each trip.*
+```{r filter_params}
+filter_type <- "none"    # choose any combination of "species", "pounds", "revenue" OR just "none"
+species_filter <- c()     # list species. if none, leave vector empty
+lbs_cutoff <- NA     # choose cutoff for landed lbs. if none, set as NA
+revenue_cutoff <- NA     # choose cutoff for exvessel revenue. if none, set as NA
+```
+
+
+### Read in Data
+
+This should be a .csv file containing raw PacFIN data.
+```{r rawdata}
+rawdat <- read.csv(paste0(rawdir,myfile))
+rawdat <- rawdat %>%
+  filter(LANDING_YEAR %in%  years)
+```
+
+Check to make sure columns were in the correct format for reading.
+```{r}
+colnames(rawdat)
+```
+
+
+### Edit existing columns
+
+First, subset the raw data to include only the columns that are needed
+```{r}
+rawdat.sub <- select(rawdat, c(FISH_TICKET_ID, PACFIN_PORT_CODE, PACFIN_GROUP_PORT_CODE, VESSEL_NUM, AGENCY_CODE, GEAR_CODE, GEAR_NAME, PACFIN_GROUP_GEAR_CODE, REMOVAL_TYPE_CODE, REMOVAL_TYPE_NAME, LANDING_DATE, LANDING_MONTH, LANDING_YEAR, PACFIN_SPECIES_CODE, LANDED_WEIGHT_LBS, EXVESSEL_REVENUE))
+```
+
+Rename the columns that will be retained in the final processed data. The last three columns are used to calculate per-species / total revenue and landed weight, but will not ultimately be retained.
+```{r}
+colnames(rawdat.sub) <- c("Rec_ID","pacfin_port_code", "port_group_code","drvid", "agency_code","gear_code", "gear_name", "gear_group", "removal_type_code", "removal_type_name", "date", "month", "year", 
+                          "PACFIN_SPECIES_CODE", "LANDED_WEIGHT_LBS", "EXVESSEL_REVENUE")
+```
+
+Remove the columns where the vessel identifier (drvid) is either "UNKNOWN" or blank ("")
+```{r}
+rawdat.sub <- rawdat.sub %>%
+  filter(drvid != "UNKNOWN") %>%
+  filter(drvid != "")
+```
+
+
+Change class of objects in columns for later calculations
+```{r}
+rawdat.sub$drvid <- as.character(rawdat.sub$drvid)
+rawdat.sub$LANDED_WEIGHT_LBS <- as.numeric(rawdat.sub$LANDED_WEIGHT_LBS)
+rawdat.sub$EXVESSEL_REVENUE <- as.numeric(rawdat.sub$EXVESSEL_REVENUE)
+```
+
+Adjust gear group code
+```{r}
+rawdat.sub$gear_group <- as.character(rawdat.sub$gear_group)
+rawdat.sub$gear_group[which(rawdat.sub$gear_group == "MSC" & rawdat.sub$gear_name == "SPEAR" |
+                              rawdat.sub$gear_group == "MSC" & rawdat.sub$gear_name == "DIVING - ABALONE IRON" |
+                        rawdat.sub$gear_group == "MSC" & rawdat.sub$gear_name == "DIVING - RAKE/HOOKS SEA URCHINS" |
+                        rawdat.sub$gear_group == "MSC" & rawdat.sub$gear_name == "DIVING" |
+                          rawdat.sub$gear_group == "MSC" & rawdat.sub$gear_name == "SHELLFISH DIVER")] <- "DVG"
+
+rawdat.sub$gear_group[which(rawdat.sub$gear_group == "MSC" & rawdat.sub$gear_name == "UNKNOWN" |
+                             rawdat.sub$gear_group == "MSC" & rawdat.sub$gear_name == "UNKNOWN OR UNSPECIFIED GEAR")] <- "USP"
+
+rawdat.sub$gear_group[which(rawdat.sub$gear_group == "MSC" & rawdat.sub$gear_name == "AQUACULTURE FARM" |
+                              rawdat.sub$gear_group == "MSC" & rawdat.sub$gear_name == "OYSTER FARM" |
+                              rawdat.sub$gear_group == "MSC" & rawdat.sub$gear_name == "CLAM FARM")] <- "FRM"
+```
+<br>
+
+
+
+### Conduct filtering (if required)
+
+Function to conduct filtering
+```{r filter_function}
+filter_tickets <- function(dat, type=c("species"), species = c("DCRB", "SABL", "LOBS", "SPRW"), lbs = NA, revenue = NA){
+  if("none" %in% type){
+    message("No filtering conducted")
+  } 
+  
+  if("species" %in% type){
+    dat <- dat %>%
+      filter(PACFIN_SPECIES_CODE %in% species)
+    message("Filtered for fish tickets where catch was any of the following:  ", paste(species, collapse=","))
+  }
+  
+  if("pounds" %in% type){
+    if(is.na(lbs)){
+      message("You asked to filter by landed pounds, but did not provide a cutoff value. Failed to filter.")
+    } else{
+      dat <- dat %>%
+        filter(LANDED_WEIGHT_LBS >= as.numeric(lbs))
+      message("Filtered for fish tickets where landed weight (lbs) was >= ", as.character(lbs))
+    }
+  }
+  
+  if("revenue" %in% type){
+    if(is.na(revenue)){
+      message("You asked to filter by exvessel revenue, but did not provide a cutoff value. Failed to filter.")
+    } else{
+      dat <- dat %>%
+        filter(EXVESSEL_REVENUE >= as.numeric(revenue))
+      message("Filtered for fish tickets where landed weight (lbs) was >= ", as.character(revenue))
+    }
+  }
+  return(dat)
+}
+```
+
+
+Conduct filtering.
+```{r filter_tix}
+rawdat.sub.filter <- filter_tickets(dat=rawdat.sub, type=filter_type, species=species_filter, lbs=lbs_cutoff, revenue=revenue_cutoff)
+```
+
+```{r}
+cat("Retained ", dim(rawdat.sub.filter)[1]/dim(rawdat.sub)[1]*100, "% records after filtering.")
+```
+<br>
+
+
+
+
+
+### Concatenate gear / catch information
+
+Concatenate all species information for the fish ticket. 
+```{r}
+all.species <- rawdat.sub.filter %>%
+  group_by(Rec_ID, removal_type_name) %>%
+  summarise(species_code_all = ifelse(length(unique(PACFIN_SPECIES_CODE)) > 1, paste(unique(PACFIN_SPECIES_CODE), collapse="/"), as.character(unique(PACFIN_SPECIES_CODE))))
+```
+<br>
+
+Concatenate the gear information for the fish ticket
+```{r}
+gear.info <- rawdat.sub.filter %>%
+  group_by(Rec_ID, removal_type_name) %>%
+  summarise(gear_name_all = ifelse(length(unique(gear_name)) > 1, paste(unique(gear_name), collapse="/"), as.character(unique(gear_name))),
+            gear_code_all = ifelse(length(unique(gear_name)) > 1, paste(unique(gear_code), collapse="/"), as.character(unique(gear_code))))
+```
+
+
+
+
+<br>
+
+
+### Calculate information for finding the target species
+
+#### per-species landed pounds and revenue
+
+First, group the fish tickets by the PacFIN-created unique ticket ID ("Rec_ID") and the type of removal. Rec_ID is the unique code given by PacFIN to fish tickets on the same day from the same vessel. 
+<br>
+Grouping by removal_type_name allows "summarise" to calculate species-specific totals for all landings by one vessel on one day for one purpose (e.g. commercial, personal, etc.). The "ifelse" statement in the summarise function tells dplyr to leave a column as "0" if the pacfin species code for that fish ticket is different than the column designation.
+
+<br>
+**For Landed Pounds:**
+
+Sum pounds by species. Add a column where the species code is combined with "..lbs.", to be used for column headers
+```{r}
+rawdat.sub.lbs.all <- rawdat.sub.filter %>%
+  group_by(Rec_ID, removal_type_name, PACFIN_SPECIES_CODE) %>%
+  summarise(lbs = sum(LANDED_WEIGHT_LBS)) %>%
+  mutate(header = paste0(PACFIN_SPECIES_CODE, "..lbs.")) %>%
+  dplyr::select(-PACFIN_SPECIES_CODE)
+```
+
+
+Spread the data set and calculate total pounds
+```{r}
+rawdat.sub.lbs.all <- spread(rawdat.sub.lbs.all, key=header, value = lbs)
+dim(rawdat.sub.lbs.all)
+```
+```{r}
+rawdat.sub.lbs.total <- rawdat.sub.lbs.all[,3:length(colnames(rawdat.sub.lbs.all))] %>%
+  mutate(total.lbs. = rowSums(., na.rm=TRUE))
+rawdat.sub.lbs.all[,"total.lbs.all"] = rawdat.sub.lbs.total$total.lbs.
+rm(rawdat.sub.lbs.total) ## name will be used below
+dim(rawdat.sub.lbs.all)
+```
+
+
+
+**For Revenue:**
+
+Sum exvessel revenue by species code. Add a column where the species code is combined with "....", to be used for column headers
+```{r}
+rawdat.sub.rev.all <- rawdat.sub.filter %>%
+  group_by(Rec_ID, removal_type_name, PACFIN_SPECIES_CODE) %>%
+  summarise(rev = sum(EXVESSEL_REVENUE)) %>%
+  mutate(header = paste0(PACFIN_SPECIES_CODE, "....")) %>%
+  dplyr::select(-PACFIN_SPECIES_CODE)
+```
+
+
+Spread the data set and calculate total pounds
+```{r}
+rawdat.sub.rev.all <- spread(rawdat.sub.rev.all, key=header, value = rev)
+dim(rawdat.sub.rev.all)
+```
+```{r}
+rawdat.sub.rev.total <- rawdat.sub.rev.all[,3:length(colnames(rawdat.sub.rev.all))] %>%
+  mutate(total.rev. = rowSums(., na.rm=TRUE))
+rawdat.sub.rev.all[,"total.rev.all"] = rawdat.sub.rev.total$total.rev.
+rm(rawdat.sub.rev.total) ## name will be used below
+dim(rawdat.sub.rev.all)
+```
+
+
+
+
+#### proportion per species
+
+**For Landed Pounds**
+
+Use the data frame created above (with per-species pounds for each trip id/purpose) to first calculate per-species proportions of the total. To do this with the prop.table function, you do have to remove the Rec_ID and removal_type_code identifiers. But it's easy to add them back in afterward
+
+```{r}
+rawdat.sub.lbs.all.prop <- rawdat.sub.lbs.all[,3:length(colnames(rawdat.sub.lbs.all))-1] %>%
+  adorn_percentages("row", na.rm=TRUE)
+ids <- as.data.frame(rawdat.sub.lbs.all[,1:2])
+rawdat.sub.lbs.all.prop <- cbind(ids, as.data.frame(rawdat.sub.lbs.all.prop))
+colnames(rawdat.sub.lbs.all.prop) <- gsub("..lbs.", "_prop", colnames(rawdat.sub.lbs.all.prop))
+rawdat.sub.lbs.all.prop <- rawdat.sub.lbs.all.prop[,-2] #why is removal_type_name showing up twice??
+```
+
+
+Just to check out the data, let's look at stacked bar plots for the first 400 trips
+```{r}
+testdat <- rawdat.sub.lbs.all.prop[1:400,]
+testdat <- dplyr::select(testdat, -removal_type_name)
+testdat.melt <- reshape2::melt(testdat, id="Rec_ID")
+ggplot(data=filter(testdat.melt, !is.na(value)), aes(x=value, fill=variable)) +
+  geom_histogram(binwidth = 0.1) +
+  facet_wrap(~variable) +
+  xlim(c(0,1.1)) +
+  guides(fill=FALSE) +
+  ggtitle("Landed Lbs")
+```
+
+**For Revenue**
+
+
+Use the data frame created above (with per-species exvessel revenue for each trip id/purpose) to first calculate per-species proportions of the total. To do this with the prop.table function, you do have to remove the Rec_ID and removal_type_code identifiers. But it's easy to add them back in afterward
+
+```{r}
+rawdat.sub.rev.all.prop <- rawdat.sub.rev.all[,3:length(colnames(rawdat.sub.rev.all))-1] %>%
+  adorn_percentages("row", na.rm=TRUE)
+ids <- as.data.frame(rawdat.sub.rev.all[,1:2])
+rawdat.sub.rev.all.prop <- cbind(ids, as.data.frame(rawdat.sub.rev.all.prop))
+rawdat.sub.rev.all.prop <- rawdat.sub.rev.all.prop[,-3]
+```
+
+
+Just to check out the data, let's look at stacked bar plots for the first 400 trips
+```{r}
+testdat <- rawdat.sub.rev.all.prop[1:400,]
+testdat <- dplyr::select(testdat, -removal_type_name)
+testdat.melt <- reshape2::melt(testdat, id="Rec_ID")
+ggplot(data=filter(testdat.melt, !is.na(value)), aes(x=value, fill=variable)) +
+  geom_histogram(binwidth = 0.1) +
+  facet_wrap(~variable) +
+  xlim(c(0,1.1)) +
+  guides(fill=FALSE) +
+  ggtitle("Exvessel Revenue")
+```
+
+
+### Create TARGET column
+
+The target column will be either specific for cetacean entanglement data, or will identify a "plurality" target.
+
+First, create a data frame where each Rec_ID is assigned a target species.
+
+**Cetacean Entanglement / Dungeness crab TARGET**
+
+Use a for loop to determine the target species for each fish ticket, then add that species to a vector. 
+```{r cetacean_target}
+if(target_type == "cetacean"){
+  
+  ## calculate pounds for DCRB, SABL, LOBS, SPRW, and OTHER Pot / Trap Catch
+  rawdat.sub.cetacean.lbs <- rawdat.sub.filter %>%
+    group_by(Rec_ID, removal_type_name) %>%
+    summarise(gear_name_all = paste(gear_name, collapse="/"),
+              DCRB..lbs. = sum( ifelse (PACFIN_SPECIES_CODE == "DCRB",LANDED_WEIGHT_LBS, 0) ), #sum landings of DCRB 
+              SABL..lbs. = sum( ifelse (PACFIN_SPECIES_CODE == "SABL",LANDED_WEIGHT_LBS, 0) ), #sum landings of SABL
+              LOBS..lbs. = sum( ifelse (PACFIN_SPECIES_CODE == "LOBS",LANDED_WEIGHT_LBS, 0) ), #sum landings of LOBS
+              SPRW..lbs. = sum( ifelse (PACFIN_SPECIES_CODE == "SPRW",LANDED_WEIGHT_LBS, 0) ), #sum landings of SPRW
+              OtherPot..lbs. = sum( ifelse (!(PACFIN_SPECIES_CODE %in% c("DCRB", "LOBS", "SABL", "SPRW")) & 
+                                              any(trap_pot_gear %in% gear_name),LANDED_WEIGHT_LBS, 0) ), #sum landings of other pot/trap gear catch
+              Other..lbs. = sum( ifelse (!(PACFIN_SPECIES_CODE %in% c("DCRB", "LOBS", "SABL", "SPRW")) & 
+                                           !(any(trap_pot_gear %in% gear_name)),LANDED_WEIGHT_LBS, 0) )) #sum landings of all other catch
+  
+  ## calculate revenue for DCRB, SABL, LOBS, SPRW, and OTHER Pot / Trap Catch
+  rawdat.sub.cetacean.rev <- rawdat.sub.filter %>%
+    group_by(Rec_ID, removal_type_name) %>%
+    summarise(gear_name_all = paste(gear_name, collapse="/"),
+              DCRB.... = sum( ifelse (PACFIN_SPECIES_CODE == "DCRB",EXVESSEL_REVENUE, 0) ), #sum landings of DCRB 
+              SABL.... = sum( ifelse (PACFIN_SPECIES_CODE == "SABL",EXVESSEL_REVENUE, 0) ), #sum landings of SABL
+              LOBS.... = sum( ifelse (PACFIN_SPECIES_CODE == "LOBS",EXVESSEL_REVENUE, 0) ), #sum landings of LOBS
+              SPRW.... = sum( ifelse (PACFIN_SPECIES_CODE == "SPRW",EXVESSEL_REVENUE, 0) ), #sum landings of SPRW
+              OtherPot.... = sum( ifelse (!(PACFIN_SPECIES_CODE %in% c("DCRB", "LOBS", "SABL", "SPRW")) & 
+                                              any(trap_pot_gear %in% gear_name),EXVESSEL_REVENUE, 0) ), #sum landings of other pot/trap gear catch
+              Other.... = sum( ifelse (!(PACFIN_SPECIES_CODE %in% c("DCRB", "LOBS", "SABL", "SPRW")) & 
+                                           !(any(trap_pot_gear %in% gear_name)),EXVESSEL_REVENUE, 0) )) #sum landings of all other catch
+  if(target_metric == "lbs"){
+    message("calculating target by lbs landed.")
+    ## get proportion of pounds
+    rawdat.sub.cetacean.prop <- rawdat.sub.cetacean.lbs %>%
+      group_by(Rec_ID, removal_type_name, gear_name_all) %>%
+      summarise(total..lbs = sum(DCRB..lbs., SABL..lbs., LOBS..lbs., SPRW..lbs., OtherPot..lbs., Other..lbs.), #total pounds landed
+                DCRB_prop = DCRB..lbs. / total..lbs, #proportion of total that was DCRB
+                SABL_prop = SABL..lbs. / total..lbs, #proportion of total that was SABL
+                LOBS_prop = LOBS..lbs. / total..lbs, #proportion of total that was LOBS
+                SPRW_prop = SPRW..lbs. / total..lbs, #proportion of total that was SPRW
+                OtherPot_prop = OtherPot..lbs. / total..lbs) #proportion of total that was OTHER POT / TRAP GEAR
+    
+    
+    ## apply decision rules to get target species
+    target_vec <- c()
+    for(i in seq(1:length(rawdat.sub.cetacean.prop$Rec_ID))){
+      new_row <- rawdat.sub.cetacean.prop[i,] #extract row "i"
+      if(as.numeric(new_row$DCRB_prop) >= 0.9){
+        target_vec[i] <- "DCRB"
+      } else if(as.numeric(new_row$LOBS_prop) >= 0.9){
+        target_vec[i] <- "LOBS"
+      } else if(any(c("FISH POT","FISH TRAP", "BOTTOMFISH POT", "TRAPS, SEATTLE TYPE (SABLEFISH)") %in% strsplit(new_row$gear_name_all,"/"))==TRUE  & new_row$SABL_prop >= 0.9){
+        target_vec[i] <- "SABL"
+      } else if(any(c("PRAWN TRAP", "SHELLFISH POT (NON-CRAB)") %in% strsplit(new_row$gear_name_all,"/"))==TRUE & new_row$SPRW_prop >= 0.9){
+        target_vec[i] <- "SPRW"
+      } else if(as.numeric(new_row$OtherPot_prop) >= 0.9){
+        target_vec[i] <- "OTHER_POT"
+      } else { target_vec[i] <- "OTHER"}
+    }
+  } 
+  
+  else if(target_metric=="revenue"){
+    message("calculating target by revenue.")
+    rawdat.sub.cetacean.prop <- rawdat.sub.cetacean.rev %>%
+      group_by(Rec_ID, removal_type_name, gear_name_all) %>%
+      summarise(total... = sum(DCRB...., SABL...., LOBS...., SPRW...., OtherPot...., Other....), #total exvessel revenue
+                DCRB_prop = ifelse(total... > 0, DCRB.... / total..., 0), #proportion of total that was DCRB
+                SABL_prop = ifelse(total... > 0, SABL.... / total...,0), #proportion of total that was SABL
+                LOBS_prop = ifelse(total... > 0, LOBS.... / total...,0), #proportion of total that was LOBS
+                SPRW_prop = ifelse(total... > 0, SPRW.... / total...,0), #proportion of total that was SPRW
+                OtherPot_prop = ifelse(total... > 0, OtherPot.... / total...,0)) #proportion of total that was OTHER POT / TRAP GEAR
+    ## apply decision rules to get target species
+    target_vec <- c()
+    for(i in seq(1:length(rawdat.sub.cetacean.prop$Rec_ID))){
+      new_row <- rawdat.sub.cetacean.prop[i,] #extract row "i"
+      if(as.numeric(new_row$DCRB_prop) >= 0.9){
+        target_vec[i] <- "DCRB"
+      } else if(as.numeric(new_row$LOBS_prop) >= 0.9){
+        target_vec[i] <- "LOBS"
+      } else if(any(c("FISH POT","FISH TRAP", "BOTTOMFISH POT", "TRAPS, SEATTLE TYPE (SABLEFISH)") %in% strsplit(new_row$gear_name_all,"/"))==TRUE  & new_row$SABL_prop >= 0.9){
+        target_vec[i] <- "SABL"
+      } else if(any(c("PRAWN TRAP", "SHELLFISH POT (NON-CRAB)") %in% strsplit(new_row$gear_name_all,"/"))==TRUE & new_row$SPRW_prop >= 0.9){
+        target_vec[i] <- "SPRW"
+      } else if(as.numeric(new_row$OtherPot_prop) >= 0.9){
+        target_vec[i] <- "OTHER_POT"
+      } else { target_vec[i] <- "OTHER"}
+    }
+  }
+  
+  ## make target data frame
+  target_df <- data.frame(Rec_ID = rawdat.sub.cetacean.prop$Rec_ID,
+                          removal_type_name = rawdat.sub.cetacean.prop$removal_type_name,
+                          TARGET = target_vec)
+  
+  ## add in a column that gives the lbs and revenue for the target species, if needed
+  if(include_target == TRUE){
+    cetacean.target.rev <- reshape2::melt(rawdat.sub.cetacean.rev, id.vars=c("Rec_ID","removal_type_name", "gear_name_all"))
+    cetacean.target.rev.1 <- left_join(cetacean.target.rev, target_df, by=c("Rec_ID", "removal_type_name"))
+    cetacean.target.rev.2 <- cetacean.target.rev.1 %>%
+      filter(variable==ifelse(TARGET == "OTHER", "Other....",
+                              ifelse(TARGET == "OTHER_POT", "OtherPot....", paste0(TARGET, "....")))) %>%
+      select(Rec_ID, removal_type_name, value)
+    target_df <- left_join(target_df, cetacean.target.rev.2, by=c("Rec_ID", "removal_type_name"))
+    colnames(target_df) <- c("Rec_ID", "removal_type_name", "TARGET", "TARGET..lbs.")
+    
+    cetacean.target.lbs <- reshape2::melt(rawdat.sub.cetacean.lbs, id.vars=c("Rec_ID","removal_type_name", "gear_name_all"))
+    cetacean.target.lbs.1 <- left_join(cetacean.target.lbs, target_df, by=c("Rec_ID", "removal_type_name"))
+    cetacean.target.lbs.2 <- cetacean.target.lbs.1 %>%
+      filter(variable==ifelse(TARGET == "OTHER", "Other..lbs.",
+                              ifelse(TARGET == "OTHER_POT", "OtherPot..lbs.", paste0(TARGET, "..lbs.")))) %>%
+      select(Rec_ID, removal_type_name, value)
+    target_df <- left_join(target_df, cetacean.target.lbs.2, by=c("Rec_ID", "removal_type_name"))
+    colnames(target_df) <- c("Rec_ID", "removal_type_name", "TARGET", "TARGET..lbs.", "TARGET....")
+  }
+} else{message("Skipping to multi-species target...")}
+```
+
+
+**General multi-species target**
+
+```{r multi_target_lbs}
+if(target_type=="multispecies"){
+  if(target_metric == "lbs"){
+    message("calculating multispecies target using pounds landed.")
+    ## isolate proportion lbs landed for all pacfin species listed, and assign NAs as 0s
+    all.prop <- dplyr::select(rawdat.sub.lbs.all.prop, -Rec_ID, -removal_type_name)
+    all.prop[is.na(all.prop)] <- 0
+    n <- dim(all.prop)[2]
+    
+    ## find greatest and second greatest proportion of each row for proportions-only df
+    max_byrow <- apply(all.prop, 1, function(x) max(x))
+    second_max_byrow <- apply(all.prop, 1, function(x) sort(x, partial=n-1)[n-1])
+    max_byrow_ids <- colnames(all.prop)[apply(all.prop,1,which.max)]
+    for(i in seq(1, length(max_byrow_ids))){
+      max_byrow_ids[i] <- substr(max_byrow_ids[i], start=1, stop=4)
+    }
+    
+    ## match above back to trip IDs. then determine whether the max value is more than 10% greater than the second highest value
+    max_byrow_df <- rawdat.sub.lbs.all.prop %>%
+      dplyr::select(Rec_ID, removal_type_name) %>%
+      mutate(max_id = max_byrow_ids, max_prop = max_byrow, second_prop = second_max_byrow, is_max = ifelse(max_prop > 1.3*second_prop, "Y", "N")) # !! line where % above 2nd catch is specified !!
+    cat("Out of ", length(max_byrow_df$removal_type_name), " tickets, ", (sum(max_byrow_df$is_max == "N")/length(max_byrow_df$removal_type_name))*100, "% did not have definitive target species.\n")
+    
+    ## filter for definitive target species
+    target_df <- max_byrow_df %>%
+      mutate(TARGET = ifelse(is_max == "Y", max_id, "NONE")) %>%
+      dplyr::select(Rec_ID, removal_type_name, TARGET)
+  } 
+  
+  else if(target_metric == "revenue"){
+    message("calculating multispecies target using exvessel revenue.")
+    ## isolate proportion exvessel revenue for all pacfin species listed, and assign NAs as 0s
+    all.prop <- dplyr::select(rawdat.sub.rev.all.prop, -Rec_ID, -removal_type_name)
+    all.prop[is.na(all.prop)] <- 0
+    n <- dim(all.prop)[2]
+    
+    ## find greatest and second greatest proportion of each row for proportions-only df
+    max_byrow <- apply(all.prop, 1, function(x) max(x))
+    second_max_byrow <- apply(all.prop, 1, function(x) sort(x, partial=n-1)[n-1])
+    max_byrow_ids <- colnames(all.prop)[apply(all.prop,1,which.max)]
+    for(i in seq(1, length(max_byrow_ids))){
+      max_byrow_ids[i] <- substr(max_byrow_ids[i], start=1, stop=4)
+    }
+    
+    ## match above back to trip IDs. then determine whether the max value is more than 10% greater than the second highest value
+    max_byrow_df <- rawdat.sub.rev.all.prop %>%
+      dplyr::select(Rec_ID, removal_type_name) %>%
+      mutate(max_id = max_byrow_ids, max_prop = test_max, second_prop = test, is_max = ifelse(max_prop > 1.1*second_prop, "Y", "N"))
+    cat("Out of ", length(max_byrow_df$removal_type_name), " tickets, ", (sum(max_byrow_df$is_max == "N")/length(max_byrow_df$removal_type_name))*100, " percent did not have definitive target species.\n")
+    
+    ## filter for definitive target species
+    target_df <- max_byrow_df %>%
+      mutate(TARGET = ifelse(is_max == "Y", max_id, "NONE")) %>%
+      dplyr::select(Rec_ID, removal_type_name, TARGET)
+  }
+  ## add revenue / lbs for target
+  if(include_target==TRUE){
+    rawdat.sub.lbs.all.melt <- melt(rawdat.sub.lbs.all, id.vars = c("Rec_ID", "removal_type_name"))
+    multisp.target.lbs <- left_join(target_df,rawdat.sub.lbs.all.melt,by=c("Rec_ID", "removal_type_name") )
+    multisp.target.lbs.1 <- multisp.target.lbs %>%
+      filter(variable==paste0(TARGET, "..lbs.")) %>%
+      select(Rec_ID, removal_type_name, value)
+    target_df <- left_join(target_df, multisp.target.lbs.1, by=c("Rec_ID", "removal_type_name"))
+    colnames(target_df) <- c("Rec_ID", "removal_type_name", "TARGET", "TARGET..lbs.")
+    rawdat.sub.rev.all.melt <- melt(rawdat.sub.rev.all, id.vars = c("Rec_ID", "removal_type_name"))
+    multisp.target.rev <- left_join(target_df,rawdat.sub.rev.all.melt,by=c("Rec_ID", "removal_type_name") )
+    multisp.target.rev.1 <- multisp.target.rev %>%
+      filter(variable==paste0(TARGET, "....")) %>%
+      select(Rec_ID, removal_type_name, value)
+    target_df <- left_join(target_df, multisp.target.rev.1, by=c("Rec_ID", "removal_type_name"))
+    colnames(target_df) <- c("Rec_ID", "removal_type_name", "TARGET", "TARGET..lbs.", "TARGET....")
+  }
+  
+  else{cat("Your selected filtering metric (", target_metric, ") is invalid.\n")}
+
+}
+
+```
+
+
+### Calculate per-species landed pounds and revenue
+
+First, group the fish tickets by the PacFIN-created unique ticket ID ("Rec_ID") and the type of removal. Rec_ID is the unique code given by PacFIN to fish tickets on the same day from the same vessel. 
+<br>
+Grouping by removal_type_name allows "summarise" to calculate species-specific totals for all landings by one vessel on one day for one purpose (e.g. commercial, personal, etc.). The "ifelse" statement in the summarise function tells dplyr to leave a column as "0" if the pacfin species code for that fish ticket is different than the column designation.
+
+<br>
+**For Landed Pounds:**
+
+assign headers for species-specific columns to each row of fish ticket data
+```{r}
+if(length(gear_types) > 1){
+  rawdat.sp.lbs <- rawdat.sub.filter %>%
+    group_by(Rec_ID, removal_type_name, PACFIN_SPECIES_CODE, gear_name) %>%
+    summarise(lbs = sum(LANDED_WEIGHT_LBS)) %>%
+    mutate(header = ifelse(PACFIN_SPECIES_CODE %in% species_cols, paste0(PACFIN_SPECIES_CODE, "..lbs."),
+                           ifelse(gear_name %in% gear_types, "OtherGear..lbs.", "Other..lbs.")))
+  message("created extra `other` column for specified gear types.")
+} else{
+  rawdat.sp.lbs <- rawdat.sub.filter %>%
+    group_by(Rec_ID, removal_type_name, PACFIN_SPECIES_CODE, gear_name) %>%
+    summarise(lbs = sum(LANDED_WEIGHT_LBS)) %>%
+    mutate(header = ifelse(PACFIN_SPECIES_CODE %in% species_cols, paste0(PACFIN_SPECIES_CODE, "..lbs."),
+                           "Other..lbs."))
+  message("you did not specify gear types. all species other than those specified were grouped into `other`.")
+}
+```
+
+combine landed lbs by trip, header
+```{r}
+rawdat.sp.lbs <- rawdat.sp.lbs[,c("Rec_ID", "removal_type_name", "lbs", "header")]
+rawdat.sp.lbs <- rawdat.sp.lbs %>%
+  group_by(Rec_ID, removal_type_name, header) %>%
+  summarise(total_lbs = sum(lbs))
+```
+
+spread
+```{r}
+rawdat.sp.lbs.spread <- spread(rawdat.sp.lbs, key=header, value=total_lbs)
+```
+
+change NA to 0s
+```{r}
+rawdat.sp.lbs.spread <- rawdat.sp.lbs.spread %>%
+  mutate_all(funs(replace(., is.na(.), 0)))
+```
+
+move "other" and "other_gear" to end of column
+```{r}
+if(length(gear_types) > 1){
+  rawdat.sp.lbs.spread <- rawdat.sp.lbs.spread %>%
+    dplyr::select(-OtherGear..lbs., everything()) %>%
+    dplyr::select(-Other..lbs., everything())
+} else{
+  rawdat.sp.lbs.spread <- rawdat.sp.lbs.spread %>%
+    dplyr::select(-Other..lbs., everything())
+}
+```
+<br>
+
+
+**For Revenue:**
+
+assign headers for species-specific columns to each row of fish ticket data
+```{r}
+if(length(gear_types) > 1){
+  rawdat.sp.rev <- rawdat.sub.filter %>%
+    group_by(Rec_ID, removal_type_name, PACFIN_SPECIES_CODE, gear_name) %>%
+    summarise(rev = sum(EXVESSEL_REVENUE)) %>%
+    mutate(header = ifelse(PACFIN_SPECIES_CODE %in% species_cols, paste0(PACFIN_SPECIES_CODE, "...."),
+                           ifelse(gear_name %in% gear_types, "OtherGear....", "Other....")))
+  message("created extra `other` column for specified gear types.")
+} else{
+  rawdat.sp.rev <- rawdat.sub.filter %>%
+    group_by(Rec_ID, removal_type_name, PACFIN_SPECIES_CODE, gear_name) %>%
+    summarise(rev = sum(EXVESSEL_REVENUE)) %>%
+    mutate(header = ifelse(PACFIN_SPECIES_CODE %in% species_cols, paste0(PACFIN_SPECIES_CODE, "...."),
+                           "Other...."))
+  message("you did not specify gear types. all species other than those specified were grouped into `other`.")
+}
+```
+
+combine exvessel revenue by trip, header
+```{r}
+rawdat.sp.rev <- rawdat.sp.rev[,c("Rec_ID", "removal_type_name", "rev", "header")]
+rawdat.sp.rev <- rawdat.sp.rev %>%
+  group_by(Rec_ID, removal_type_name, header) %>%
+  summarise(total_rev = sum(rev))
+```
+
+spread
+```{r}
+rawdat.sp.rev.spread <- spread(rawdat.sp.rev, key=header, value=total_rev)
+```
+
+change NA to 0s
+```{r}
+rawdat.sp.rev.spread <- rawdat.sp.rev.spread %>%
+  mutate_all(funs(replace(., is.na(.), 0)))
+```
+
+move "other" and "other_gear" to end of column
+```{r}
+if(length(gear_types) > 1){
+  rawdat.sp.rev.spread <- rawdat.sp.rev.spread %>%
+    dplyr::select(-OtherGear...., everything()) %>%
+    dplyr::select(-Other...., everything())
+} else{
+  rawdat.sp.rev.spread <- rawdat.sp.rev.spread %>%
+    dplyr::select(-Other...., everything())
+}
+```
+
+
+### Calculate proportions of per-species pounds
+
+Use the data frame with per-species pounds for each trip id/purpose to calculate per-species proportions of the total. To do this with the prop.table function, you do have to remove the Rec_ID and removal_type_code identifiers. But it's easy to add them back in afterward
+
+```{r}
+rawdat.sp.lbs.forprop <- rawdat.sp.lbs.spread %>%
+  dplyr::select(contains("..lbs.")) #will grab any column with "lbs" in it
+rawdat.sp.lbs.mat <- rawdat.sp.lbs.forprop[,3:length(colnames(rawdat.sp.lbs.forprop))]
+rawdat.sp.lbs.prop <- sweep(as.matrix(rawdat.sp.lbs.mat), 1, rowSums(as.matrix(rawdat.sp.lbs.mat)), FUN="/")
+
+ids <- as.data.frame(rawdat.sp.lbs.forprop[,1:2])
+rawdat.sp.lbs.prop <- cbind(ids, as.data.frame(rawdat.sp.lbs.prop))
+colnames(rawdat.sp.lbs.prop) <- gsub("..lbs.", "_prop", colnames(rawdat.sp.lbs.prop))
+```
+
+Add these proportions to the lbs data frame
+```{r}
+rawdat.sp.lbs.spread <- left_join(rawdat.sp.lbs.spread, rawdat.sp.lbs.prop, by=c("Rec_ID", "removal_type_name"))
+```
+
+
+
+
+
+
+
+### Group fish tickets on same day
+
+First, remove the landed pounds, species code, and exvessel revenue columns (now that we have used them for all necessary calculations)
+```{r}
+rawdat.sub2 <- dplyr::select(rawdat.sub.filter, -gear_code, -gear_name, -EXVESSEL_REVENUE, -PACFIN_SPECIES_CODE, -LANDED_WEIGHT_LBS)
+```
+  
+  
+Now that catch specific information is gone, we can remove any duplicate fish ticket entries. This returns 1 row per Rec_ID + removal_code / removal_type / gear type combination
+```{r}
+part.processdat <- distinct(rawdat.sub2) 
+```
+
+
+Add concatenated gear & species info back into fish tickets. Make sure that this did not split fish tickets.
+```{r}
+part.processdat <- left_join(part.processdat, gear.info, by=c("Rec_ID", "removal_type_name"))
+part.processdat <- left_join(part.processdat, all.species, by=c("Rec_ID", "removal_type_name"))
+dim(part.processdat)
+part.processdat <- part.processdat %>% distinct()
+dim(part.processdat)
+```
+
+
+
+### Add the pounds / revenue, target columns to the original raw data set
+
+Join partially processed data with revenue, lbs data frames using Rec_ID and removal_type_code
+```{r}
+part.processdat <- left_join(part.processdat, rawdat.sp.lbs.spread, by=c("Rec_ID", "removal_type_name"))
+part.processdat <- left_join(part.processdat, rawdat.sp.rev.spread, by=c("Rec_ID", "removal_type_name"))
+part2.processdat <- left_join(part.processdat, target_df, by=c("Rec_ID", "removal_type_name"))
+```
+
+
+Make sure that all Rec_ID and removal_type_code from the partially processed data have lbs and revenue from the lbs.all and rev.all data
+```{r}
+sum(is.na(part2.processdat$total....)) ## should = 0
+sum(is.na(part2.processdat$total..lbs.)) ## should = 0
+```
+
+
+
+### Add column to highlight whether gear type was trap/pot/ring; add TARGET column
+Use if statement to create column "TRAP.OR.POT.OR.RING". I couldn't get the combination of str_detect and strsplit to work with `mutate`
+```{r}
+TRAP.OR.POT.OR.RING <- c()
+for(i in seq(1, length(part2.processdat$Rec_ID))){
+  tmp_row <- part2.processdat[i,]
+  tmp_trap <- ifelse(any(str_detect(strsplit(tmp_row$gear_name_all,"/"), trap_pot_gear)) == "TRUE", "Y", "")
+  TRAP.OR.POT.OR.RING[i] <- tmp_trap
+}
+
+part3.processdat <- part2.processdat %>%
+  mutate(TRAP.OR.POT.OR.RING=TRAP.OR.POT.OR.RING)
+```
+<br>
+
+
+### Format dates and Add new date-related columns
+
+Change existing date columns to date objects and format
+```{r}
+## save date as date object
+part3.processdat$date <- as.Date(as.character(part3.processdat$date), "%d-%b-%y")
+
+## change date format to mm/dd/YYYY
+part3.processdat$date <- format(part3.processdat$date, format = "%m/%d/%Y")
+
+## change month from numeric (1-12) to name
+part3.processdat$month <- month.name[part3.processdat$month]
+```
+
+
+Create the columns: year_mo, jdate, year_jdate, Week, year_Wk
+```{r}
+part4.processdat <- part3.processdat %>%
+  mutate(month_numeric = match(month,month.name)) %>% #create temporary column with month represented as a number (1-12)
+  mutate(year_mo = ifelse(month_numeric < 10, paste0(year, "_0", as.character(month_numeric)), paste0(year, "_", as.character(month_numeric)))) %>% #combine year and numeric month to string "YYYY_mm"
+  select(-month_numeric) %>% #remove temporary month column
+  mutate(jdate = format(as.Date(date, format = "%m/%d/%Y"), "%j")) %>% #julian date
+  mutate(year_jdate = paste0(year,"_",jdate)) %>% #combine year and jlian date to "YYYY_jjj"
+  mutate(Week = week(mdy(date))) %>% #week of the year (1-53)
+  mutate(year_Wk = ifelse(Week < 10, paste0(year,"_0",Week), paste0(year,"_",Week))) #combine week and year to "YYYY_ww"
+```
+
+
+
+
+### Add final columns regarding duplicated tickets / totaltrips
+
+The `Dup_date` column describes if there are two fish tickets on the same day for a certain vessel. *Note*: could not do a straitforward Dupe_non_pers `mutate` here, because if there is a pair of tickets from the same vessel on the same day where the first ticket IS for personal use and the second IS NOT, the Dupe_non_pers `mutate` below will only mark the first ticket. See below.
+```{r}
+part4.processdat.dupdate <- part4.processdat %>%
+  group_by(drvid) %>%
+  mutate(Dupe_date = ifelse(duplicated(date) == TRUE | duplicated(date, fromLast = TRUE) == TRUE,"Y","")) ## without "fromLast = TRUE", will only mark the second entry
+```
+
+
+For all tickets marked for personal use, create new Dupe_non_pers column. `Dupe_non_pers` is whether the duplicated ticket was NOT for personal use (from `removal_type_code`).If it is a duplicated ticket, save new column value as "", otherwise NA
+```{r}
+part4.processdat.dupdate.pers <- part4.processdat.dupdate %>%
+  filter(removal_type_code == "P") %>%
+  mutate(Dupe_non_pers = ifelse(Dupe_date == "Y","", NA)) 
+```
+
+
+Create function to check if duplicated fish tickets have at least one ticket detailing personal use. Note that the function is designed to take vessel_ID and ticket_date as vectors since the dplyr function `mutate` works with a vector
+```{r}
+get_non_pers <- function(vessel_id, ticket_date, dat){
+  # initiate empty vector
+  non_pers_vec <- c() 
+  
+  # for each row in the `dat` dataframe #
+  for(i in seq(1:length(vessel_id))){
+    ## filter data to include only rows with a certain drvid and date (duplicate tickets)
+    tmp_dat <- dat %>%
+      filter(drvid == vessel_id[i] & date == ticket_date[i])
+    
+    ## if AT LEAST ONE ticket is marked for personal use (removal_type_code is "P") ##
+    if("P" %in% tmp_dat$removal_type_code){
+      ### save blank ("") to vector
+      non_pers_vec[i] <- ""
+    } else{
+      ### otherwise, save "Y"
+      non_pers_vec[i] <- "Y"
+      }
+  }
+  return(non_pers_vec)
+}
+```
+
+
+For all duplicated tickets that were NOT for personal use, see if one or more of the tickets from the same vessel on the same day WERE marked for personal use using the `get_non_pers` function. *Note:* This may take awhile, since the function as it stands will take a subset of the data frame for each new drvid / date combination.
+```{r}
+tStart <- Sys.time()
+
+part4.processdat.dupdate.y <- part4.processdat.dupdate %>%
+  filter(Dupe_date == "Y")
+part4.processdat.dupdate.nonpers <- part4.processdat.dupdate.y %>%
+  filter(removal_type_code != "P") %>%
+  mutate(Dupe_non_pers = get_non_pers(vessel_id = drvid, ticket_date = date, dat = part4.processdat.dupdate.y))
+
+Sys.time() - tStart 
+```
+
+
+Combine data frames
+```{r}
+dupdates_tmp <- rbind(part4.processdat.dupdate.pers, part4.processdat.dupdate.nonpers)
+part5.processdat <- left_join(part4.processdat.dupdate, dupdates_tmp, by=colnames(part4.processdat.dupdate))
+```
+
+
+To make sure the new column calculations worked, I like to look at the data and see which tickets were marked as duplicated; then which of those had `Dupe_non_pers` == 1
+```{r eval=FALSE}
+part5.processdat.sorted <- part5.processdat %>%
+  arrange(drvid, desc(year), desc(date)) %>%
+  filter(Dupe_date == "Y")
+View(part5.processdat.sorted)
+```
+
+
+
+And finally, the totaltrips column is a remnant of some monthly summary information from Jameal. Technically, totaltrips = length(unique(trip_id)). But I'm going to use it to see how many fish tickets were collapsed into each column.
+```{r}
+n_tickets <- rawdat.sub %>%
+  group_by(Rec_ID, removal_type_name) %>%
+  summarise(totaltrips=n())
+part5.processdat <- left_join(part5.processdat, n_tickets, by=c("Rec_ID", "removal_type_name"))
+```
+
+
+
+### Re order the data frame 
+This must be done manually.
+```{r reorder_dataframe}
+final.processdat <- part5.processdat
+```
+
+
+### Save as a .csv
+```{r}
+for(y in unique(rawdat$LANDING_YEAR)){
+  year.final.processdat <- filter(final.processdat, year == y )
+  write.csv(file = paste0(processdir, "fish tickets ", y, " processed_multispecies03.csv"), x = year.final.processdat, row.names = FALSE)
+  cat("wrote out file for ", y, "\n")
+}
+```
+

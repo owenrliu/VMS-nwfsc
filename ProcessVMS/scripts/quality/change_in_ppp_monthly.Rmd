@@ -1,0 +1,139 @@
+---
+title: "Change in Price Per Pound"
+output: html_document
+---
+
+How did price per pound change change by month?
+
+- Time period: 2009-17, monthly
+
+- Spatial domains: California, central vs northern CA (S of BDG, BDG and N)
+
+- Especially with KFs observation that pots in water much longer in spring 2014 in California than in typical years.
+
+
+
+Steps in the script: 
+
+- Grab all DCRB fish tickets
+- Get mean & sd of ppp for Dcrab for each port group, in each month. 
+- Get mean & sd of ppp for Dcrab for each region, in each month
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "E:/Networks/Participation_Networks")
+```
+
+
+Load packages
+```{r}
+library(dplyr)
+library(ggplot2)
+library(foreign)
+library(lubridate)
+```
+<br>
+
+
+### Read in data
+Processed fish ticket data, with lengths (2010-2018)
+```{r}
+years <- seq(2009,2017)
+for(y in years){
+  tmptix <- read.csv(paste0("input_data/processed/fish_tickets_",y,"_processed_for_networks.csv"))
+  if(y==years[1]){
+    tickets <- tmptix
+  } else{
+    if(y != 2018){
+      tickets <- rbind(tickets,tmptix)
+    } else{
+      tmptix <- dplyr::select(tmptix, colnames(tickets))
+      tickets <- rbind(tickets,tmptix)
+    }
+  }
+}
+head(tickets)
+```
+
+### Filtering
+```{r}
+dcrb_tickets <- tickets %>%
+  filter(spid_recode=="DCRB") %>%
+  filter(removal_type == "COMMERCIAL (NON-EFP)" | removal_type == "COMMERCIAL(DIRECT SALES)" | removal_type == "UNKNOWN") %>%
+  filter(agid == "C")
+
+dcrb_tickets_thin <- dplyr::select(dcrb_tickets, trip_id, year, tdate, pcgroup, spid_recode, ppp)
+```
+
+### Summarising
+```{r}
+dcrb_tickets_thin$tdate <- ymd(dcrb_tickets_thin$tdate)
+dcrb_tickets_thin <- dcrb_tickets_thin %>%
+  mutate(tmonth = month(tdate))
+```
+```{r}
+dcrb_summary_ca <- dcrb_tickets_thin %>%
+  group_by(year, tmonth) %>%
+  summarise(mean_ppp = mean(ppp, na.rm=TRUE), sd_ppp = sd(ppp, na.rm=TRUE))
+dcrb_summary_region <- dcrb_tickets_thin %>%
+  mutate(region=ifelse(pcgroup %in% c("CCA", "ERA", "BGA", "BDA"), "North", "South")) %>%
+  group_by(year, tmonth, region) %>%
+  summarise(mean_ppp = mean(ppp, na.rm=TRUE), sd_ppp = sd(ppp, na.rm=TRUE))
+```
+
+
+### Plotting
+```{r}
+png("../../VMS-repo/CA_DCRB_ppp_annual.png")
+ggplot(dcrb_summary_ca, aes(x=tmonth,y=mean_ppp)) +
+  geom_point() +
+  geom_errorbar(aes(ymin=mean_ppp-sd_ppp, ymax=mean_ppp+sd_ppp)) +
+  geom_line() +
+  facet_wrap(~year) +
+  scale_x_continuous(breaks=seq(1,12,by=2), labels=seq(1,12,by=2)) +
+  ggtitle("D.crab Reported Price per Pound\nCalifornia coastwide") +
+  xlab("Ticket Month") +
+  ylab("Mean PPP")
+dev.off()
+```
+
+
+
+```{r}
+png("../../VMS-repo/CA_DCRB_ppp_annual_byregion.png")
+ggplot(dcrb_summary_region, aes(x=tmonth,y=mean_ppp, col=region)) +
+  geom_point() +
+  geom_errorbar(aes(ymin=mean_ppp-sd_ppp, ymax=mean_ppp+sd_ppp)) +
+  geom_line() +
+  facet_wrap(~year) +
+  scale_x_continuous(breaks=seq(1,12,by=2), labels=seq(1,12,by=2)) +
+  ggtitle("D.crab Reported Price per Pound\nCalifornia coastwide") +
+  xlab("Ticket Month") +
+  ylab("Mean PPP")
+dev.off()
+```
+<br>
+
+### By port group, 2014
+```{r}
+dcrb_summary_2014 <- dcrb_tickets_thin %>%
+  filter(year==2015) %>%
+  group_by(year, tmonth, pcgroup) %>%
+  summarise(mean_ppp = mean(ppp, na.rm=TRUE), sd_ppp = sd(ppp, na.rm=TRUE))
+```
+
+```{r}
+png("../../VMS-repo/CA_DCRB_ppp_annual_2015_byport.png")
+ggplot(dcrb_summary_2014, aes(x=tmonth,y=mean_ppp)) +
+  geom_point() +
+  geom_errorbar(aes(ymin=mean_ppp-sd_ppp, ymax=mean_ppp+sd_ppp)) +
+  geom_line() +
+  facet_wrap(~pcgroup) +
+  scale_x_continuous(breaks=seq(1,12,by=2), labels=seq(1,12,by=2)) +
+  ggtitle("D.crab Reported Price per Pound\n2015") +
+  xlab("Ticket Month") +
+  ylab("Mean PPP")
+dev.off()
+```

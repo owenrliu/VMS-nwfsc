@@ -1,0 +1,134 @@
+---
+title: "Time Gaps in Raw VMS Data"
+output: html_document
+---
+
+
+
+<br>
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS-repo") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r include=FALSE}
+library(dplyr)
+library(tidyr)
+library(lubridate) 
+library(ggplot2)
+library(move)
+```
+<br>
+
+Create Objects / Data Frames
+```{r}
+## directory where filtered VMS data is stored as .csv file
+VMS_dir = "ProcessVMS/R_Output/match/unfiltered/"
+
+## calendar years
+y <- 2016
+```
+<br>
+
+### Read in data
+```{r}
+vms <- read.csv(paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_all.csv"))
+```
+<br>
+
+
+#### Ensure that R recognises the timestamp as a POSIXct class
+```{r}
+vms$westcoastdate <- ymd_hms(vms$westcoastdate, tz= "America/Los_Angeles")
+class(vms$westcoastdate)
+vms$UTCDATETIM <- ymd_hms(vms$UTCDATETIM, tz= "UTC")
+
+```
+<br>
+
+
+#### Deal with duplicates
+Ensure that there are no duplicated dates/times under the same Rec_ID
+```{r}
+dim(vms)
+vms_nodup <- vms[!duplicated(vms[,c("Rec_ID","UTCDATETIM")]),]
+dim(vms_nodup)
+
+cat("Proportion of VMS records removed for being duplicate records:", 1-dim(vms_nodup)[1]/dim(vms)[1])
+```
+<br>
+
+#### Order timestamps within each individual
+```{r}
+vms_nodup <- vms_nodup %>%
+  arrange(Rec_ID, UTCDATETIM)
+```
+<br>
+
+### Create `move` object, with trip as "id"
+```{r}
+vms_nodup$DECLARATIO[vms_nodup$DECLARATIO == "N/A"] <- NA
+```
+<br>
+```{r}
+colnames(vms_nodup)
+```
+<br>
+```{r}
+start.time <- Sys.time()
+movedat <- move(x=vms_nodup$LONGITUDE,
+                y=vms_nodup$LATITUDE,
+                time=vms_nodup$UTCDATETIM,
+                data=vms_nodup,
+                proj=sp::CRS("+init=epsg:4326"),
+                animal=vms_nodup$Rec_ID)
+Sys.time() - start.time
+```
+<br>
+
+Use `timeLag` to get the amount of time that has elapsed between each successive VMS record.
+```{r}
+timestep <- timeLag(movedat, units="secs")
+```
+<br>
+Add time lags back into move object
+```{r}
+movedat$timelag <- unlist(lapply(timestep, c, NA))
+```
+<br>
+
+Create a data frame; thin it out
+```{r}
+vmsdat_move <- as.data.frame(movedat)
+vmsdat_move <- vmsdat_move %>%
+  dplyr::select(c(Port_Of_Landing, Rec_ID, LATITUDE, LONGITUDE, westcoastdate, timelag)) %>%
+  arrange(Rec_ID, westcoastdate)
+head(vmsdat_move)
+```
+<br>
+
+
+Plot all time gaps
+```{r}
+ggplot(data=filter(vmsdat_move, !is.na(timelag)), aes(x=timelag/3600)) +
+  geom_histogram() +
+  xlab("Time Between VMS Records (hrs)")
+
+
+ggplot(data=filter(vmsdat_move, !is.na(timelag) & timelag < 21600), aes(x=timelag/3600)) +
+  geom_histogram() +
+  xlab("Time Between VMS Records (hrs)")
+```
+
+
+
+

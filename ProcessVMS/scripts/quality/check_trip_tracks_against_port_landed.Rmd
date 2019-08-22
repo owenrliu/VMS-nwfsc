@@ -1,0 +1,154 @@
+---
+title: "Plot Trip Tracks against Port of Landing"
+output: html_document
+---
+
+While checking the location of the first VMS point against the previous port of landing, I found one trip where the VMS tracks were very far away from the recorded port of landing. I'm worried that this is a pervasive problem in the data set as a result of a glitch in the mapping script. 
+
+
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "E:/VMS_RAship") 
+```
+<br>
+
+Install packages
+```{r}
+library(lubridate)
+library(ggmap)
+library(dplyr)
+library(ggplot2)
+```
+
+
+### Read in the data
+
+Fish tickets matched for 2010
+```{r}
+fishtix <- read.csv("R_Output/FishTix_VMS_Match_v2/FishTix_wVMS_10d_lookback_2010.csv")
+```
+<br>
+
+Filter out all duplicated fish tickets
+```{r}
+fishtix_nodup <- filter(fishtix, VMS_lookback_pres != "Duplicated")
+```
+
+
+
+
+VMS data matched for 2010
+```{r}
+vmsdat <- read.csv("R_Output/FishTix_VMS_Match_v2/cleaned_vms/VMS_Outputs_wTARGET_10d_lookback_2010_cleaned.csv")
+```
+
+
+
+### Filter for tickets from large vessels that targeted DCRB, and were landed in california
+```{r}
+fishtix_filtered <- fishtix_nodup %>%
+  filter(agency_code == "C") %>%
+  filter(TARGET=="DCRB") %>%
+  filter(FINAL_LENGTH >= 40) %>%
+  filter(VMS_lookback_pres==1)
+```
+
+
+
+
+
+### Add columns for lat/long of port of landing
+
+```{r}
+ports_landed <- data.frame(ports=unique(fishtix_filtered$pacfin_port_code))
+towns <- c("San Francisco", "Half Moon Bay", "Bodega Bay", "Santa Cruz", "Crescent City", 
+           "Eureka", "San Francisco Area",
+           "Fort Bragg", "Point Arena",
+           "Sausalito")
+port_lat <- c(37.774929, 37.463638, 38.317451, 36.974117, 41.852807,
+         40.786140, 37.774929,
+         39.453473, 38.90880,
+         37.859027)
+port_long <- c(-122.419418, -122.429237, -123.028648, -122.030792, -124.149862,
+          -124.161308, -122.419418,
+          -123.814911, -123.69307,
+          -122.485469)
+
+port_x <- c(551129, 550532, 495800, 586266, 400024,
+            401840, 551129,
+            430708, 439909,
+            545280)
+port_y <- c(4181002, 4146451, 4242792, 4092440, 4623357,
+            4517437, 4181002,
+            4366550, 4306884,
+            4190306)
+
+
+port_landed_coords <- cbind(ports_landed, towns, port_lat, port_long, port_x, port_y)
+```
+
+
+
+### Join to VMS data 
+
+```{r}
+fishtix_allVMS <- left_join(fishtix_filtered, vmsdat, by=c("drvid" = "DOCNUM", "Rec_ID"="Rec_ID"))
+```
+```{r}
+fishtix_allVMS <- left_join(fishtix_allVMS, port_landed_coords, by=c("pacfin_port_code" = "ports"))
+```
+
+
+### Plot
+
+```{r}
+library(tidyverse)
+library(maps)
+library(maptools)
+library(ggrepel)
+library(viridis)
+library(ggplot2)
+library(pals)
+library(grid)
+```
+
+
+```{r}
+USA <- map_data("world") %>% 
+  filter(region=="USA")
+states <- map_data("state")
+west_coast <- subset(states, region %in% c("california", "oregon", "washington"))
+```
+
+```{r}
+for(id in unique(fishtix_allVMS$Rec_ID)){
+  tmp_dat <- dplyr::filter(fishtix_allVMS, Rec_ID==id)
+  myplot <- ggplot() +
+    geom_polygon(data = states, aes(x=long, y = lat, fill=region, group=group), color=" grey37", alpha=0.3) +
+    guides(fill=FALSE)+
+    geom_point(data=filter(port_landed_coords, ports==unique(tmp_dat$pacfin_port_code)), aes(x=port_long, y=port_lat), size=2, col="red") +
+    geom_point(data=tmp_dat, aes(x=LONGITUDE, y=LATITUDE), size = 2, alpha = 0.7, col="blue") + 
+    coord_map(xlim= c(-120, -125),  ylim = c(30,45)) +
+    ggtitle(paste0("Trip ID:", id))
+  print(myplot)
+}
+```
+
+
+```{r}
+id=48701427
+tmp_dat <- dplyr::filter(fishtix_allVMS, Rec_ID==id)
+myplot <- ggplot() +
+  geom_polygon(data = states, aes(x=long, y = lat, fill=region, group=group), color=" grey37", alpha=0.3) +
+  guides(fill=FALSE)+
+  geom_point(data=filter(port_landed_coords, ports==unique(tmp_dat$pacfin_port_code)), aes(x=port_long, y=port_lat), size=2, col="red") +
+  geom_point(data=tmp_dat, aes(x=LONGITUDE, y=LATITUDE), size = 2, alpha = 0.7, col="blue") + 
+  coord_map(xlim= c(-120, -125),  ylim = c(30,45)) +
+  ggtitle(paste0("Trip ID:", id))
+print(myplot)
+```
+
+
+
+
+
+

@@ -1,0 +1,316 @@
+---
+title: "Returns to Port"
+output: html_document
+---
+
+Document returns to port for Dungeness crab trips. 
+
+This uses Blake's depth key to identify in port records.
+
+Why? I'm thinking of truncating the VMS data, so that the input for home range / trip duration analysis only covers from when the vessel returned to port to sell fish, back to the last time the vessel left port. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/Mary.Fisher/Documents/VMS-repo") 
+```
+<br>
+
+### Prep for running code
+
+```{r}
+rm(list=ls())
+```
+<br>
+```{r include=FALSE}
+library(adehabitatHR)
+library(lubridate)
+library(ggmap)
+library(ggplot2)
+library(dplyr)
+library(maps)
+library(rgdal)
+library(rgeos)
+library(raster)
+```
+<br>
+
+Input / variables
+```{r}
+datfile <- "ProcessVMS/R_Output/interpolation/VMS_Outputs_wTARGET_10d_lookback_2010_final_cleaned_interpolated_regular.csv"
+outfile <- "HomeRange/R_Output/2010_DCRB_TripCharacteristics_"
+
+# file with port coordinates, including directory
+coords_file = "Input_Data/port_coords_fromBlake_edited.csv"
+
+## calendar years
+years <- c(2010)
+
+## width of buffer circle (in meters). applies to all ports but those that require smaller buffers
+r = 3000
+
+## port codes for any ports that require reduced buffer sizes. Default is only COS
+ports_lowbuffer <- c("COS")
+
+## width of buffer circle (in meters) for COS
+r2 = 1500
+
+## cutoff value for speed (m/s) -- 1m/s ~ 2 knots
+speed_cutoff <- 0.75
+```
+<br>
+
+
+### Read in data
+**VMS data**
+```{r vms}
+vms <- read.csv(datfile)
+head(vms)
+```
+
+**Bathymetry**
+```{r bathy}
+bathy.grid <- readRDS("Input_Data/bathymetry/vms_composite_bath_spGrid.RDS")
+```
+<br>
+
+**Port Locations**
+```{r}
+portdat <- read.csv(coords_file)
+if(any(is.na(portdat$lat))==TRUE){
+  message("WARNING: some ports are missing coordinates. ports were removed from data frame.")
+  portdat <- filter(portdat, !is.na(lat))
+}
+port_coords <- portdat
+port_coords_reg <- portdat %>% filter(!(port_code %in% ports_lowbuffer))
+port_coords_sm <- portdat %>% filter(port_code %in% ports_lowbuffer)
+```
+<br>
+
+
+### Prep the port coordinates
+*Note - to assign a project, `proj4string` requires coordinates in xy (lng/lat) order*
+```{r}
+coordinates(port_coords) <- c("Lon", "Lat") 
+proj4string(port_coords) <- CRS("+init=epsg:4326") # WGS 84
+port_coords_geo <- spTransform(port_coords, CRSobj = CRS("+init=epsg:32610"))
+
+coordinates(port_coords_reg) <- c("Lon", "Lat") 
+proj4string(port_coords_reg) <- CRS("+init=epsg:4326") # WGS 84
+port_coords_reg_geo <- spTransform(port_coords_reg, CRSobj = CRS("+init=epsg:32610"))
+
+coordinates(port_coords_sm) <- c("Lon", "Lat") 
+proj4string(port_coords_sm) <- CRS("+init=epsg:4326") # WGS 84
+port_coords_sm_geo <- spTransform(port_coords_sm, CRSobj = CRS("+init=epsg:32610"))
+```
+<br>
+
+### Create buffer
+```{r buffer}
+buffer_polygons_reg <- gBuffer(port_coords_reg_geo, byid=TRUE, width=r)
+buffer_polygons_sm <- gBuffer(port_coords_sm_geo, byid=TRUE, width=r2)
+buffer_polygons  <- rbind(buffer_polygons_reg, buffer_polygons_sm)
+```
+<br>
+
+### Find in-port points
+https://www.nceas.ucsb.edu/scicomp/usecases/point-in-polygon 
+
+Assign projection to VMS points
+```{r}
+vms_sp <- vms
+coordinates(vms_sp) <- c("LONGITUDE", "LATITUDE") 
+proj4string(vms_sp) <- CRS("+init=epsg:4326") # WGS 84
+vms_geo <- spTransform(vms_sp, CRSobj = CRS("+init=epsg:32610"))
+```
+<br>
+
+
+Identify data points within buffer zones
+```{r}
+in.port <- over(vms_geo, buffer_polygons)$port_code
+vms <- mutate(vms, in_port = in.port)
+```
+<br>
+
+
+Mark "remove" if the record is in port *and* the avg speed is < 1 m/s.
+```{r remove_flag}
+vms <- mutate(vms, to_rm = ifelse(!is.na(in_port) & avg_speed_recalc < speed_cutoff, "remove", "retain"))
+```
+<br>
+
+Filter to Dungeness crab
+```{r}
+dcrb_vms <- vms %>%
+  filter(TARGET_max=="DCRB")
+```
+<br>
+
+### Check number of time vessel leaves port
+
+Find trips where the vessel leaves port more than once (identified by the sequence of an in-port and then an offshore record).
+```{r leaves}
+leave_port <- dcrb_vms %>% arrange(Rec_ID, UTCDATETIM) %>%
+  group_by(Rec_ID) %>%
+  mutate(leave_port = to_rm=="remove" & lead(to_rm=="retain"), g=cumsum(leave_port)) %>%
+  filter(leave_port | lag(leave_port)) %>%
+  dplyr::select(Rec_ID, g) %>%
+  distinct()
+sum(leave_port$g > 1) / length(leave_port$g)
+```
+<br>
+
+Now read in duration of each trip, in days
+```{r}
+duration <- read.csv("ProcessVMS/R_Output/WEAR_Workshop/2010_2016-2018_regularizedVMS_trip_duration.csv")
+duration <- filter(duration, year == 2010)
+```
+<br>
+
+Match to the leave port data frame, using Rec_ID
+```{r}
+leave_port <- left_join(leave_port, duration, by="Rec_ID")
+```
+<br>
+
+```{r}
+ggplot(leave_port, aes(x=g, y=n.days, group = g)) +
+  geom_boxplot() +
+  xlab("Leaves Port") +
+  ylab("Days of Trip")
+```
+<br>
+
+### Check number of times vessel enters port
+
+Find trips where the vessel leaves port more than once (identified by the sequence of an in-port and then an offshore record).
+```{r enters2}
+enter_port <- dcrb_vms %>% arrange(Rec_ID, UTCDATETIM) %>%
+  group_by(Rec_ID) %>%
+  mutate(enter_port = to_rm == "retain" & lead(to_rm == "remove"), g=cumsum(enter_port)) %>%
+  filter(enter_port | lag(enter_port)) %>%
+  group_by(Rec_ID) %>%
+  summarise(g = max(g))
+sum(enter_port$g ==0) / length(enter_port$g)
+```
+<br>
+
+Match to the leave port data frame, using Rec_ID
+```{r}
+enter_port <- left_join(enter_port, duration, by="Rec_ID")
+enter_port <- mutate(enter_port, size_cat = ifelse(FINAL_LENGTH >= 40, "Large", "Small"))
+```
+<br>
+
+```{r}
+ggplot(enter_port, aes(x=g)) + 
+  geom_histogram() + theme_bw()
+ggplot(data=filter(enter_port, !is.na(FINAL_LENGTH)), aes(y=FINAL_LENGTH, x=g)) + 
+  geom_point() + theme_bw() +xlab("Enters Port") + ylab("Vessel Length (ft)")
+ggplot(enter_port, aes(x=as.factor(g), y=n.days)) +
+  geom_boxplot() +
+  xlab("Enters Port") +
+  ylab("Days of Trip")
+```
+<br>
+
+WTF is going on when the vessel enters port more than 5 times?
+```{r}
+weird_trips <- filter(enter_port, g > 5)
+weird_trips_vms <- filter(dcrb_vms, Rec_ID %in% weird_trips$Rec_ID)
+length(unique(weird_trips$Rec_ID))
+```
+<br>
+
+
+```{r plot}
+data(stateMapEnv)
+states_df <- map_data("state") %>%
+  filter(region == "california" | region=="oregon" | region=="washington")
+for(trip in unique(weird_trips$Rec_ID)){
+  tmp_vms <- filter(weird_trips_vms, Rec_ID==trip)
+  myplot<- ggplot() +
+    geom_polygon(data=states_df, aes(x=long, y=lat, group=group), fill="grey47") +
+    geom_point(data=tmp_vms, aes(x=LONGITUDE, y=LATITUDE, col=westcoastdate_notime), alpha=0.5) +
+    geom_path(data=tmp_vms, aes(x=LONGITUDE, y=LATITUDE), col="grey10", alpha=0.5) +
+    coord_cartesian(xlim=c(min(tmp_vms$LONGITUDE - 0.25), max(tmp_vms$LONGITUDE + 0.25)), ylim=c(min(tmp_vms$LATITUDE -0.25), max(tmp_vms$LATITUDE +0.25))) +
+    ggtitle(trip)
+  print(myplot)
+}
+```
+<br>
+
+```{r}
+dcrb_vms %>% filter(Rec_ID == trip) %>% dplyr::select(Rec_ID, westcoastdate, Port_Of_Landing, avg_speed_recalc, in_port, to_rm)
+```
+
+
+### Compare different methods of identifying "returns to port"
+
+
+**ArcGIS polygon-based returns**
+
+Get bathymetry at VMS data points.
+```{r add_depth}
+vms_sp <- vms
+coordinates(vms_sp) <- c("LONGITUDE", "LATITUDE") 
+proj4string(vms_sp) <- CRS("+init=epsg:4326") # WGS 84
+crs(bathy.grid) <- CRS("+init=epsg:4326") # WGS 84
+bathy.points <- over(vms_sp, bathy.grid)$vms_composite_bath
+vms <- mutate(vms, NGDC_M = bathy.points)
+```
+<br>
+
+Use Blake's coding system to identify in-port points
+```{r}
+vms <- mutate(vms, in_port_bathy = ifelse(NGDC_M < -100000, "in_port", "offshore"))
+```
+<br>
+
+Filter to Dungeness crab
+```{r}
+dcrb_vms <- vms %>%
+  filter(TARGET_max=="DCRB") %>%
+  filter(NGDC_M < 5)
+```
+<br>
+
+```{r eval=FALSE}
+weird_trips_vms <- filter(dcrb_vms, Rec_ID %in% weird_trips$Rec_ID)
+View(weird_trips_vms %>% dplyr::select(Rec_ID, DOCNUM, UTCDATETIM, LATITUDE, LONGITUDE, avg_speed_recalc, in_port, to_rm, NGDC_M, in_port_bathy) %>% arrange(Rec_ID, UTCDATETIM))
+```
+
+
+Find trips where the vessel leaves port more than once, according to bathymetry
+```{r enters}
+enter_port_bathy <- dcrb_vms %>% arrange(Rec_ID, UTCDATETIM) %>%
+  group_by(Rec_ID) %>%
+  mutate(enter_port = in_port_bathy == "in_port" & lead(in_port_bathy == "offshore"), bathy.g=cumsum(enter_port)) %>%
+  filter(enter_port | lag(enter_port)) %>%
+  group_by(Rec_ID) %>%
+  summarise(bathy.g = max(bathy.g))
+sum(enter_port_bathy$bathy.g ==0) / length(enter_port_bathy$bathy.g)
+```
+```{r}
+enter_port_compare <- left_join(enter_port, enter_port_bathy, by="Rec_ID")
+enter_port_compare <- mutate(enter_port_compare, diff.g = g-bathy.g)
+ggplot(enter_port_compare, aes(x=diff.g)) +
+  geom_histogram() +
+  xlab("Enters Port (Buffer Zone -- ArcGIS)")
+```
+ArcGIS consistently reports one extra entrance to port than buffer zones.
+*This is because the speed cannot be calculated for the last record of each trip, so a "to remove" designation cannot be provided under the buffer zone filtering. However, the ArcGIS filtering can still designate the data point as in port.*
+
+```{r eval=FALSE}
+test_trips <- unique(filter(enter_port_compare, diff.g==-1)$Rec_ID)[1:5]
+test_trips_vms <- filter(dcrb_vms, Rec_ID %in% test_trips)
+View(test_trips_vms %>% dplyr::select(Rec_ID, DOCNUM, UTCDATETIM, LATITUDE, LONGITUDE, avg_speed_recalc, in_port, to_rm, NGDC_M, in_port_bathy) %>% arrange(Rec_ID, UTCDATETIM))
+```
+<br>
+
+
+
+
+
+
+

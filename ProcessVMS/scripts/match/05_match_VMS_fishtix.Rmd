@@ -1,0 +1,440 @@
+---
+title: "Match Fish Ticket to VMS Data"
+output:
+  html_document:
+    df_print: paged
+---
+
+This notebook formalizes the code provided by Jameal Samhouri (Join VMS and fish ticket data full years of both.R) to match PacFIN fish ticket data to VMS data for the CA / OR / WA coast fisheries. Notes from the original code were copied here, in italics.
+
+This is version 2 of the code. In this version, the statement to search for the "begin" date (line 284) of the lookback window for each fish ticket has changed. First, the code looks for the most recent fish ticket in a dataframe that includes fish tickets from both the current year and the previous year (according to the lookback window variable). Second, the time assigned to the date of the most recent fish ticket is now 23:59:59, rather than 00:00:01. 
+
+
+<br>
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "C:/Users/Mary.Fisher/Documents/VMS-repo") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r}
+#install.packages("foreign")
+#install.packages("dplyr")
+#install.packages("tidyr")
+#install.packages("lubridate") #https://rstudio-pubs-static.s3.amazonaws.com/28038_1bcb9aa80ca84f27ace07d612872861a.html
+
+library(foreign)
+library(readr)
+library(rgdal)
+library(rgeos)
+library(dplyr)
+library(tidyr)
+library(lubridate) #https://rstudio-pubs-static.s3.amazonaws.com/28038_1bcb9aa80ca84f27ace07d612872861a.html
+```
+<br>
+
+Create Objects / Data Frames
+```{r}
+## directory where Blake's processed VMS data is stored as .dbf files
+VMS_dir = "Input_Data/fromOLE_cleaned/"
+
+## directory where processed fish ticket data is stored as .csv file
+PacFINdir = "Input_Data/processed_multisp/"
+
+## output directory
+outdir = "ProcessVMS/R_Output/match/unfiltered/"
+
+## year
+current_year <- 2014
+
+## look back window (in days)
+lookback_window <- 10
+
+## output for vms data. leave blank
+vms_out <- c()
+
+## output for fish tickets. leave blank
+fishtix_out <- c()
+```
+<br>
+<br>
+
+### Read in Data
+Fish ticket data (processed)
+<br>
+*2009-2016 FISH TICKET DATA PRE-PROCESSED FROM BLAKE WITH TARGET COLUMN: the .csv is copied directly from "2009-2016 fish tickets processing VMS only V4.xlsx", and includes only vessels monitored by VMS. the version in fromBlakeNov2017 removes FALSE target groups*
+```{r}
+if(current_year == 2009){
+  fishtix <- read.csv(paste0(PacFINdir,"processed_fishtickets_with_vlength_", current_year, ".csv"))
+  #fishtix <- fishtix %>%
+    #filter(as.numeric(DCRB..lbs.) > 0)
+} else{
+  fishtix1 <- read.csv(paste0(PacFINdir,"processed_fishtickets_with_vlength_", current_year, ".csv"))
+  fishtix2 <- read.csv(paste0(PacFINdir,"processed_fishtickets_with_vlength_", current_year-1, ".csv"))
+  fishtix <- rbind(fishtix1, fishtix2)
+  #fishtix <- fishtix %>%
+    #filter(as.numeric(DCRB..lbs.) > 0)
+}
+```
+<br>
+
+```{r}
+#colnames(fishtix)[1] <- "Rec_ID" # should already be named
+head(fishtix)
+unique(fishtix$TARGET)
+```
+
+<br>
+
+Read in VMS files
+```{r}
+## .DBF FILES
+#as.is: should character vectors not be converted to factors? if set to FALSE, you will not be able to fix VMS date/time using parse_date_time function
+# tmp_dbf_previous <- read.dbf(paste0(VMS_dir,"bath_region_all_data_", current_year-1,"_edited.dbf"), as.is=TRUE)
+# tmp_dbf_current <- read.dbf(paste0(VMS_dir,"bath_region_all_data_", current_year,"_edited.dbf"), as.is=TRUE)
+
+## .CSV FILES
+tmp_dbf_previous <- read.csv(paste0(VMS_dir,"bath_region_all_data_", current_year-1,"_edited.csv"), as.is=TRUE)
+tmp_dbf_current <- read.csv(paste0(VMS_dir,"bath_region_all_data_", current_year,"_edited.csv"), as.is=TRUE)
+
+tmp_dbf_current <- tmp_dbf_current[,colnames(tmp_dbf_previous)]
+```
+<br>
+
+Use rbind to join the VMS data frames
+```{r}
+if(current_year == 2009){
+  tmp_dbf <- tmp_dbf_current
+} else{
+  tmp_dbf <- rbind(tmp_dbf_current,tmp_dbf_previous)
+  dim(tmp_dbf_current); dim(tmp_dbf_previous); dim(tmp_dbf)
+}
+```
+<br>
+
+
+
+### Prep VMS Data
+Make sure that all VMS dates are the same format (year-month-day, hour and minute)
+```{r}
+tmp_dbf$UTCDATETIM <- parse_date_time(tmp_dbf$UTCDATETIM, orders = c("ymd HMS","ymd HM"))
+```
+<br>
+
+PacFIN reports in west coast time, so create two columns with date / time in LA time zone
+```{r}
+tmp_dbf <- tmp_dbf %>%
+  # with time (hour, minute)
+  mutate(westcoastdate = with_tz(UTCDATETIM, tzone = "America/Los_Angeles")) %>%
+  # without time
+  mutate(westcoastdate_notime = as_date(westcoastdate))
+```
+<br>
+
+Remove duplicate VMS records: *remove any rows which are duplicated in their entirety (except for VMS_RECNO)* <- note that this section was hashed out in Jameal's script. It shouldn't be necessary because pre-processing removes duplicates.
+```{r eval=FALSE}
+## How many records are duplicates?
+length(which(duplicated(subset(tmp_dbf, select=-VMS_RECNO)))) #80901 for 2010
+
+## Remove them
+#tmp_dbf <- tmp_dbf[-which(duplicated(subset(tmp_dbf, select=-VMS_RECNO))),]
+```
+<br>
+
+
+### Use VMS data to set begin / end dates and lookback window
+Verify the year for the data set we are interested in
+```{r}
+tmp_vms_year <- max(unique(year(tmp_dbf$westcoastdate))); tmp_vms_year
+```
+<br>
+
+Save the dates that serve as the beginning and end of that year's data
+```{r}
+tmp_vms_year_begin <- ymd(paste0(tmp_vms_year,"-01-01"), tz= "America/Los_Angeles")
+tmp_vms_year_end <- ymd(paste0(tmp_vms_year,"-12-31"), tz= "America/Los_Angeles")
+```
+<br>
+
+Create lookback object
+```{r}
+if(tmp_vms_year == 2009){
+  tmp_vms_year_lookback <- tmp_vms_year_begin
+} else{
+  tmp_vms_year_lookback <- tmp_vms_year_begin - days(lookback_window)
+}
+```
+<br>
+
+
+### Prep Fish Ticket Data
+Edit date column to correct time zone and format
+```{r}
+fishtix$date <- mdy(fishtix$date, tz="America/Los_Angeles")
+```
+<br>
+
+Make a list of vessels and count them
+```{r}
+vessel_list <- as.character(unique(fishtix$drvid))
+num_vessels <- length(vessel_list)
+```
+<br>
+
+Truncate fish ticket data to match VMS year WITH a ten day lookback window where appropriate. This should prevent fish tickets from the previous year being assigned the same VMS data points.
+```{r}
+fishtix_VMSyear <- fishtix %>%
+    filter(date >= tmp_vms_year_begin & date <= tmp_vms_year_end) 
+```
+```{r}
+tmp_vms_year_lookback
+fishtix_VMSyear_wLookback <- fishtix %>%
+  filter(date >= tmp_vms_year_lookback & date <= tmp_vms_year_end)
+```
+
+-----
+## Run loop to create matched output
+<br>
+There are two for loops in the following code chunk. The first will loop over each vessel, and the second will loop over all of the fish tickets for that vessel within the target year. 
+<br>
+
+A summary of the code chunk:
+
+1. IF there are >0 VMS entries and fish ticket entries for vessel XX in the desired year...
+
+2. Subset the VMS and fish ticket data for vessel XX only. Sort the VMS data by date (descending), and the fish ticket data by date (descending) AND by the largest pounds landed for that ticket on the same day.
+
+3. Create a new column, VMS_pres_lookback, and a new vector, TARGET_tmp, to be filled later. 
+
+4. For each fish ticket YY...
+
+5. Set the date of fish ticket YY as the "end" of the lookback window. Set the "begin" of the lookback window as either 10 days prior to ticket YY, or the most recent previous fish ticket, whichever comes first.
+
+  (a) If the "begin" date is equal to the "end" date, fish ticket YY is a duplicate. Save "Duplicated" in the VMS_pres_lookback column and move on to the next fish ticket.
+  
+  (b) If the "begin" date is NOT equal to the "end" date, assign all VMS records within that period to ticket YY. Save the VMS data to the output data frame. Remove any duplicates in the data frame. Move on to the next fish ticket.
+
+<br>
+```{r}
+## start time to run code
+tStart <- Sys.time()
+
+
+for(i in 1:num_vessels){
+  # choose the vessel to work with
+  tmp_vessel <- vessel_list[i] #i=290 # i=2 is vessel 205318, has duplicates for 2010, eg on 9/4/10. #i=608 is vessel 607016, has duplicates on 3/8/10
+  cat("Starting vessel", i, "\n", "Vessel Number / drvid:", tmp_vessel, "\n")
+  
+  # determine if this vessel has VMS data in the same year as the current VMS file
+  tmp_num_vms_records <- sum(tmp_dbf$DOCNUM == tmp_vessel, na.rm = TRUE)
+  
+  # determine if this vessel has fish tix in the same year as the current VMS file
+  tmp_num_fishtix <- sum(fishtix_VMSyear$drvid == tmp_vessel, na.rm = TRUE)
+  cat("Number of fish tickets for this vessel:", tmp_num_fishtix, "\n\n")
+  
+  
+  ########### for vessels with fish ticket & VMS data ###########
+  if( tmp_num_vms_records > 0 & tmp_num_fishtix > 0) {
+    # subset VMS records for focal vessel
+    tmp_dbf_for_tmp_vessel <- tmp_dbf[which(tmp_dbf$DOCNUM == tmp_vessel),]
+    # sort VMS records by westcoastdate (most to least recent)
+    tmp_dbf_for_tmp_vessel <- tmp_dbf_for_tmp_vessel %>%
+      arrange( desc(westcoastdate) )
+    
+    # subset the fishtix records for focal vessel
+    fishtix_VMSyear_for_tmp_vessel <- fishtix_VMSyear[which(fishtix_VMSyear$drvid == tmp_vessel),]
+    # sort by date (most to least recent). if there are multiple tickets from the same day, also sort by pound landed (smallest to largest)
+    fishtix_VMSyear_for_tmp_vessel_ordered <- fishtix_VMSyear_for_tmp_vessel %>%
+      arrange( desc(date),
+               pmin(DCRB..lbs.,LOBS..lbs.,SABL..lbs.,SPRW..lbs.,OtherGear..lbs., Other..lbs.)
+               )
+    
+    # subset the fishtix records WITH LOOKBACK for focal vessel
+    fishtix_VMSyear_wLookback_for_tmp_vessel <- fishtix_VMSyear_wLookback[which(fishtix_VMSyear_wLookback$drvid == tmp_vessel),]
+    # sort by date (most to least recent). if there are multiple tickets from the same day, also sort by pound landed (smallest to largest)
+    fishtix_VMSyear_wLookback_for_tmp_vessel_ordered <- fishtix_VMSyear_wLookback_for_tmp_vessel %>%
+      arrange( desc(date),
+               pmin(DCRB..lbs.,LOBS..lbs.,SABL..lbs.,SPRW..lbs.,OtherGear..lbs., Other..lbs.)
+      )
+    tmp_num_fishtix_wLookback <- length(fishtix_VMSyear_wLookback_for_tmp_vessel$drvid)
+  
+    
+    # create a new column "VMS_pres_lookback" to be filled later. set all current values to "NA"
+    fishtix_VMSyear_for_tmp_vessel_ordered$VMS_lookback_pres <- NA
+    
+    # create empty vector for the target catch. see "purpose of target_tmp vector" at end of file.
+    TARGET_tmp <- c()
+    
+    
+    ########### looping over each fish ticket ###########
+    # get the index for the last fish ticket in the year of interest
+    ##last_fishticket_in_year = tail(which(fishtix_VMSyear_for_tmp_vessel_ordered$year == tmp_vms_year), n=1)
+    for(j in 1:tmp_num_fishtix){
+      # save the date of the current "j" fish ticket, "end". the "ymd_hms" function transforms dates to POSIXobjects. "2010-11-22 23:59:59 PST"
+      end <- ymd_hms(
+          paste(fishtix_VMSyear_for_tmp_vessel_ordered$date[j], "23:59:59"),
+          tz= "America/Los_Angeles"
+        )
+      
+      # save the date of the previous "j+1" fish ticket, "begin" (recall that dates are in descending order). "2010-11-19 00:00:01 PST"
+      ## the "max" statement provides a pre-specified searchback window to look back, so that
+      ## "begin" is set either to X days before the date of the current "j" fish ticket, OR the previous fish ticket (if this isn't the last fish ticket for this vessel in this year), OR X days before the beginning of the current year.
+      begin <- ymd_hms(max( end - days(lookback_window),
+                            #if this is not the last fish ticket, also pull from the previous fish ticket (whether that ticket is in the current or the previous year)
+                            if(j!=tmp_num_fishtix_wLookback) {
+                              ymd_hms(paste(fishtix_VMSyear_wLookback_for_tmp_vessel_ordered$date[j+1], "23:59:59"),tz= "America/Los_Angeles")}, # changed from "00:00:01" to prevent overlap on day of fish ticket, between years (if within year, code will remove these VMS records from output)
+                            ymd_hms(paste(tmp_vms_year_lookback, "00:00:01"),tz= "America/Los_Angeles"), na.rm=TRUE),tz= "America/Los_Angeles")
+
+      # there may be multiple fish tickets landed on the same day. if so:
+      ## write out fishtix_VMSyear_for_tmp_vessel_ordered a la vms_out
+      ## as_date() is necessary to drop the time from each date
+      ## note this means that in cases where there are multiple tickets on a single date, the fish ticket that accounts for the max landings of a single target group will receive the label Duplicated as will all others on that date except the ticket accounting for the least landings of a target group. That will ticket will be assigned a value of 1 
+      if(as_date(end) == as_date(begin)) {
+        # add TARGET for fish ticket "j" to the TARGET_tmp vector 
+        TARGET_tmp <- paste0(fishtix_VMSyear_for_tmp_vessel_ordered[j,'TARGET'],TARGET_tmp)
+        # then mark VMS_pres_lookback as Duplicated
+        fishtix_VMSyear_for_tmp_vessel_ordered[j,'VMS_lookback_pres'] <- "Duplicated"
+        # save this row to the data frame fishtix_out (will not include VMS data?)
+        fishtix_out <- rbind(fishtix_VMSyear_for_tmp_vessel_ordered[j,], fishtix_out)
+        j <- j+1
+        }
+      
+      ########### looking at VMS data ###########
+      if(as_date(end) != as_date(begin)) {
+        
+        ########### STEP 1: determine if there are any VMS data associated with the focal fish ticket. 
+        ## how many VMS records are there for the focal fish ticket?
+        tmp_num_vms_records_lookback <- nrow(tmp_dbf_for_tmp_vessel %>% 
+                                               filter(westcoastdate >= begin & westcoastdate <= end))
+        ## set "VMS_pres_lookback" to 1 if there are VMS data, to do something later
+        if(tmp_num_vms_records_lookback>0) { fishtix_VMSyear_for_tmp_vessel_ordered[j,'VMS_lookback_pres'] <- 1 }
+        ## set "VMS_pres_lookback" to 0 if there are NOT VMS data
+        if(tmp_num_vms_records_lookback==0) { fishtix_VMSyear_for_tmp_vessel_ordered[j,'VMS_lookback_pres'] <- 0 }
+        ## save the new data (with VMS_pres_lookback code) to write out
+        fishtix_out <- rbind(fishtix_VMSyear_for_tmp_vessel_ordered[j,], fishtix_out)
+        
+        ########### STEP 2: populate a VMS dataframe that has a new column relating each geolocation to target group (feistier). 
+        vmstmp <- tmp_dbf_for_tmp_vessel %>%
+          ## filter original dbf input for that vessel to only include the focal dates
+          filter(westcoastdate >= begin & westcoastdate <= end) %>%
+          ## create "target", "port_of_landing", and "rec_ID" columns
+          mutate(TARGET = paste0(TARGET_tmp,as.character(fishtix_VMSyear_for_tmp_vessel_ordered[j,'TARGET'])),
+              Port_Of_Landing = fishtix_VMSyear_for_tmp_vessel_ordered[j,'pacfin_port_code'],
+              Rec_ID = fishtix_VMSyear_for_tmp_vessel_ordered[j,'Rec_ID']
+            )
+        
+        ## save dbf info for that vessel, with new columns
+        vms_out <- rbind(vms_out, vmstmp)
+        
+        # dealing with days where appropriate VMS records are ambigous between fish tickets
+        # drop dates from vms_out for this vessel that are also part of vmstmp
+        
+        if(any(duplicated(subset(vms_out,select=VMS_RECNO),fromLast=TRUE))) {
+          vms_out <- vms_out[-which(duplicated(subset(vms_out,select=VMS_RECNO),fromLast=TRUE)),]
+        }
+        
+        TARGET_tmp <- c()
+      } # end if end != begin statement
+      
+      
+    } # end for loop j from 1:tmp_num_fishtix
+  } # end if statement for tmp_num_vms_records > 0 & tmp_num_fishtix > 0
+} # end for loop i for 1:num_vessels
+
+Sys.time() - tStart
+
+
+write.csv(vms_out, file=paste0(outdir,"VMS_Outputs_",lookback_window,"d_lookback_", tmp_vms_year,".csv"), row.names=FALSE)
+write.csv(fishtix_out, file=paste0(outdir,"FishTix_wVMS_",lookback_window,"d_lookback_", tmp_vms_year,".csv"), row.names=FALSE)
+
+```
+<br>
+
+
+The following code was added 11/29/2017 in order to make the TARGET_max column, and write out the data frames as a `.dbf`.
+```{r}
+tStart2 <- Sys.time()
+
+#### Create new VMS object with the TARGET_max column ####
+vms_out2 <- vms_out %>%
+  ## add a column that takes the first four characters from the "TARGET" column, which lists all target species
+  mutate(TARGET_max = substr(TARGET,1,4))
+
+Sys.time() - tStart2
+####
+
+#### Write out file with all VMS records (added by MF, 9/25/2018)
+ 
+vms_out2$UTCDATETIM <- as.character(vms_out2$UTCDATETIM) #NECESSARY FOR .DBF
+vms_out2$westcoastdate <- as.character(vms_out2$westcoastdate) #NECESSARY FOR .DBF
+
+write.csv(vms_out2,paste0(outdir,"VMS_Outputs_wTARGET_",lookback_window,"d_lookback_",tmp_vms_year, "_all.csv"), row.names = FALSE)
+
+
+#### Write out file with VMS records in present year
+
+vms_out2$westcoastdate <- ymd_hms(vms_out2$westcoastdate) #NECESSARY FOR .DBF
+
+vms_out2 <- vms_out2 %>%
+  ## filter to the current year only
+  filter( year(westcoastdate) == tmp_vms_year )
+
+vms_out2$westcoastdate <- as.character(vms_out2$westcoastdate) #NECESSARY FOR .DBF
+
+write.csv(vms_out2,paste0(outdir,"VMS_Outputs_wTARGET_",lookback_window,"d_lookback_",tmp_vms_year, ".csv"), row.names = FALSE)
+
+write.dbf(vms_out2[,c('VMS_RECNO','TARGET','TARGET_max','Port_Of_Landing','Rec_ID')],paste0(outdir,"VMS_with_Target_Feistier_", lookback_window, "d_lookback_",tmp_vms_year,".dbf"))
+
+```
+
+If the current year is 2010+
+```{r} 
+if(current_year > 2009){
+  vms_previous_year_Dec11_31 <- paste0("vms_out_",tmp_vms_year-1,"_Dec11_31")
+  vms_previous_year_Dec11_31 <- vms_out %>%
+    filter( year(westcoastdate) == tmp_vms_year-1 ) %>%
+    mutate(TARGET_max = substr(TARGET,1,4))
+  vms_previous_year_Dec11_31$UTCDATETIM <- as.character(vms_previous_year_Dec11_31$UTCDATETIM)
+  
+  write.csv(vms_previous_year_Dec11_31,paste0(outdir,"VMS_Outputs_wTARGET_",lookback_window,"d_lookback_",tmp_vms_year-1,"_Dec11_31.csv"), row.names = FALSE)
+}
+```
+
+
+### write out data as csv
+
+```{r eval=FALSE}
+#write.csv(vms_out, file="R_Output/VMS_Outputs_lookback_21d_partial2010.csv")
+#write.csv(fishtix_out, file="R_Output/FishTix_wVMS_21d_lookback_partial2010.csv")
+
+```
+
+
+<br>
+<br>
+Purpose of the TARGET_tmp vector:
+
+1. vector is created if a vessel has fish ticket and VMS data, before the fish ticket for loop
+
+2. vector is cleared at the end of the fish ticket for loop IF the fish ticket is either (1) the only ticket for that date, or (2) the final ticket for that date.
+
+3. the only time targets are added to the TARGET_tmp vector is if there are multiple fish tickets for the same day as the current tickets, AND there are still fish tickets left to process for that day.
+
+SO 
+
+the TARGET column in the vms output data frame will list all target species caught if there are multiple fish tickets landed for that window of time. because the lbs landed are listed from largest to smallest, and target species are appended to the BEGINNING of the vector, the FIRST species listed in the vector is the species with the most pounds landed from that trip. 
+
+
+
+
+
+
+

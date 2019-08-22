@@ -1,0 +1,383 @@
+---
+title: "Clean up Matched VMS-Fishtix Data for Repeat Trips between Calendar Years"
+output: html_document
+---
+
+
+This notebook cleans up VMS records. 
+
+
+**First Step:** Check for VMS records that may have been assigned to multiple fish tickets between years
+
+**Second Step:** Remove outlier trips where the Port of Landing is > 50km from the last VMS point of the associated trip. 
+
+<br>
+*Version 2: Edited to better handle files from multiple years.*
+
+<br>
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS-repo") 
+```
+<br>
+<br>
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r}
+#install.packages("foreign")
+#install.packages("dplyr")
+#install.packages("tidyr")
+#install.packages("lubridate") #https://rstudio-pubs-static.s3.amazonaws.com/28038_1bcb9aa80ca84f27ace07d612872861a.html
+
+library(foreign)
+library(dplyr)
+library(tidyr)
+library(lubridate) #https://rstudio-pubs-static.s3.amazonaws.com/28038_1bcb9aa80ca84f27ace07d612872861a.html
+library(ggplot2)
+```
+<br>
+
+Create Objects / Data Frames
+```{r}
+## directory where Blake's processed VMS data is stored as .dbf files
+origVMS_dir = "ProcessVMS/R_Output/match/unfiltered/"
+
+## directory where processed fish ticket data is stored as .csv file
+cleanVMS_dir = "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+
+## calendar years
+years <- c(2011)
+```
+<br>
+
+### Read in the data
+
+First, the full vms data set
+```{r data}
+vms_out <- read.csv(paste0(origVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_",years[1],"_all.csv"))
+
+if(length(years) > 1){
+  for(i in seq(2:length(years))){
+    vms_out_tmp <- read.csv(paste0(origVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_",years[i],"_all.csv"))
+    vms_out <- rbind(vms_out, vms_out_tmp)
+  }
+}
+```
+```{r}
+dim(vms_out)
+head(vms_out)
+```
+<br>
+
+
+Fish tickets (to order the vms data)
+```{r tickets}
+fishtix_out <- read.csv(paste0(origVMS_dir,"FishTix_wVMS_10d_lookback_",years[1],".csv"))
+fishtix_out$date <- date(parse_date_time(fishtix_out$date, orders=c("Ymd", "mdY")))
+
+if(length(years) > 1){
+  for(i in seq(2,length(years))){
+    fishtix_out_tmp <- read.csv(paste0(origVMS_dir,"FishTix_wVMS_10d_lookback_",years[i],".csv"))
+    fishtix_out_tmp$date <- date(parse_date_time(fishtix_out_tmp$date, orders=c("Ymd", "mdY")))
+    fishtix_out <- rbind(fishtix_out, fishtix_out_tmp)
+  }
+}
+```
+
+```{r}
+head(fishtix_out)
+```
+
+
+
+### Add the fish ticket year to each VMS record
+subset fish ticket data frame to include just the drvid, Rec_ID
+```{r}
+fishtix_thin <- select(fishtix_out, c(drvid, Rec_ID, date, VMS_lookback_pres))
+```
+<br>
+
+joined fish ticket year info to the vms data. You may get a warning here that factors had to be coerced to a character vector.
+```{r join}
+vms_w_year <- left_join(vms_out, fishtix_thin, by=c("DOCNUM"="drvid", "Rec_ID"="Rec_ID"))
+```
+<br>
+
+```{r}
+colnames(vms_w_year)
+```
+<br>
+
+### Descend by date of fish ticket
+```{r}
+vms_w_year_ordered <- vms_w_year %>% arrange(desc(date))
+```
+<br>
+
+________________
+<br>
+
+ 
+### Check for duplicates
+
+Previous version of the matching script allowed for the same VMS record to be applied to multiple fishing trips. This section simply checks to make sure that this is not occurring in the updated version of the matching script.
+
+First, I want to remove marked duplicate fish tickets
+```{r rm_duplicates}
+vms_w_year_ordered_nodup1 <- filter(vms_w_year_ordered, VMS_lookback_pres != "Duplicated")
+dim(vms_w_year_ordered)
+dim(vms_w_year_ordered_nodup1)
+```
+(But save those records in a separate date frame to add in later)
+```{r}
+vms_fishtix_duplicated <- filter(vms_w_year_ordered, VMS_lookback_pres == "Duplicated")
+```
+<br>
+
+Then, I want to identify truly duplicated records
+```{r id_duplicates}
+vms_duplicated <- vms_w_year_ordered_nodup1[c(which(duplicated(subset(vms_w_year_ordered_nodup1,select=VMS_RECNO),fromLast=TRUE)),                                 which(duplicated(subset(vms_w_year_ordered_nodup1,select=VMS_RECNO),fromLast=FALSE))),]
+
+if(dim(vms_duplicated)[1] == 0){
+  print("There were no duplicate records.") 
+  vms_out_clean <- vms_w_year_ordered
+} else{
+  ## take a look at duplicated records
+  View(vms_duplicated %>% arrange(VMS_RECNO))
+  ## which month were th fish tickets landed, for fish tickets which have the duplicate VMS records?
+  hist(month(vms_duplicated$date))
+  ## Which month were the duplicate VMS records in? 
+  vms_duplicated$westcoastdate_notime <- ymd(vms_duplicated$westcoastdate_notime)
+  unique(month(vms_duplicated$westcoastdate_notime))
+  
+  ## get a new data set without duplicates, and add back in duplicated fish tickets
+  vms_out_clean <- vms_w_year_ordered[-which(duplicated(subset(vms_w_year_ordered,select=VMS_RECNO),fromLast=TRUE)),]
+  vms_out_clean <- rbind(vms_out_clean, vms_fishtix_duplicated)
+  dim(vms_out_clean)[1]/dim(vms_w_year_ordered)[1]
+  }
+```
+<br>
+____________
+
+
+
+### Remove trips where Port of Landing > 50km from last VMS data point
+
+#### Get lat/long for every port of landing
+
+These coordinates were provided by Blake Feist.
+```{r}
+portlist_coords <- read.csv("Input_Data/port_coords_fromBlake.csv")
+head(portlist_coords)
+```
+
+#### Filter VMS data to include only the last VMS data point for each trip
+
+```{r}
+fishtix_lastVMS <- vms_out_clean %>%
+  group_by(Rec_ID) %>%
+  top_n(n=1, wt=westcoastdate) %>%
+  ungroup()
+```
+
+
+#### Add the lat/long for port of landing to each trip
+```{r}
+colnames(portlist_coords) <- c("port_code", "lng", "lat")
+```
+```{r port_coords}
+fishtix_lastVMS <- left_join(fishtix_lastVMS, portlist_coords, by=c("Port_Of_Landing" = "port_code"))
+```
+
+How many lat/long coordinates NA? For 2010 data, 3% were NA
+```{r}
+sum(is.na(fishtix_lastVMS$lat)) / length(fishtix_lastVMS$lat)
+```
+
+#### Find distance between end VMS and port
+Calculate distance with geosphere
+```{r calc_dist}
+library(geosphere)
+lastVMS_distances <- distHaversine(p1=cbind(fishtix_lastVMS$lng, fishtix_lastVMS$lat),
+                                    p2=cbind(fishtix_lastVMS$LONGITUDE, fishtix_lastVMS$LATITUDE))
+```
+
+
+Add the distances as another column
+```{r}
+fishtix_lastVMS <- fishtix_lastVMS %>%
+  mutate(port_to_VMS = lastVMS_distances / 1000)
+```
+
+#### Sort out trips to keep / remove
+```{r filter_retain}
+trips_to_keep <- fishtix_lastVMS %>%
+  filter(port_to_VMS <= 50)
+cat("number of trips retained: ",length(trips_to_keep$Rec_ID),"\n")
+trips_to_remove <- fishtix_lastVMS %>%
+  filter(port_to_VMS > 50)
+cat("number of trips removed: ", length(trips_to_remove$Rec_ID),"\n")
+cat(length(trips_to_remove$Rec_ID) / sum(length(trips_to_keep$Rec_ID) + length(trips_to_remove$Rec_ID))," of trips were removed from the data set.")
+```
+About 7-8% of all trips are removed (2010). 
+
+
+```{r filter_rm}
+dcrb_trips_to_keep <- fishtix_lastVMS %>%
+  filter(port_to_VMS <= 50) %>%
+  filter(TARGET_max == "DCRB")
+cat("number of DCRB trips retained: ",length(dcrb_trips_to_keep$Rec_ID),"\n")
+dcrb_trips_to_remove <- fishtix_lastVMS %>%
+  filter(port_to_VMS > 50) %>%
+  filter(TARGET_max=="DCRB")
+cat("number of DCRB trips removed: ", length(dcrb_trips_to_remove$Rec_ID),"\n")
+cat(length(dcrb_trips_to_remove$Rec_ID) / sum(length(dcrb_trips_to_keep$Rec_ID) + length(dcrb_trips_to_remove$Rec_ID))," of DCRB trips were removed from the data set.")
+```
+About 9% of Dungeness crab trips are removed (2010).
+
+```{r}
+myplot <- ggplot(data=trips_to_keep %>% select(Rec_ID, Port_Of_Landing) %>% distinct(), aes(x=Port_Of_Landing)) +
+  geom_bar() +
+  theme(axis.text.x = element_text(angle=90)) +
+  ylab("Number of Unique Trips") +
+  ggtitle("Trips <= 50km")
+print(myplot)
+png(paste0(cleanVMS_dir, "freq_retained_trips_byport.png"))
+print(myplot)
+dev.off()
+```
+```{r}
+myplot <- ggplot(data=trips_to_remove %>% select(Rec_ID, Port_Of_Landing) %>% distinct(), aes(x=Port_Of_Landing)) +
+  geom_bar() +
+  theme(axis.text.x = element_text(angle=90)) +
+  ylab("Number of Unique Trips") +
+  ggtitle("Trips > 50km")
+print(myplot)
+png(paste0(cleanVMS_dir, "freq_removed_trips_byport.png"))
+print(myplot)
+dev.off()
+```
+
+
+Pull all VMS data for trips to keep / remove
+```{r}
+vms_out_clean2 <- left_join(select(trips_to_keep, Rec_ID, DOCNUM), vms_out_clean, by=c("Rec_ID", "DOCNUM"))
+
+vms_out_removed <- left_join(select(trips_to_remove, Rec_ID, DOCNUM), vms_out_clean, by=c("Rec_ID", "DOCNUM"))
+```
+
+
+
+### Edit VMS_lookback_pres in fish ticket data
+
+I want to use `2` to mark the trips which had VMS in the original matching code (`1`) but where VMS was removed during this filtering step.
+```{r update_tix}
+fishtix_out_edit <- fishtix_out %>%
+  mutate(VMS_lookback_pres = ifelse(Rec_ID %in% unique(trips_to_remove$Rec_ID), 2, as.character(VMS_lookback_pres)))
+
+sum(fishtix_out$VMS_lookback_pres != fishtix_out_edit$VMS_lookback_pres)/dim(fishtix_out_edit)[1]
+```
+About 4% of tickets (2016/2017) *note-not unique trips*
+<br>
+
+### Write out new fish ticket data
+```{r tix_out}
+for(i in years){
+  # filter data for VMS entries corresponding to fish tickets for that year
+  fishtix_out_edit_tmp <- fishtix_out_edit %>% 
+    filter(year(date) == i)
+  write.csv(x=fishtix_out_edit_tmp, file=paste0(cleanVMS_dir,"FishTix_wVMS_10d_lookback_",i,"_VMSedit.csv"), row.names=FALSE)
+}
+```
+
+### Write out new VMS data
+
+First, remove the columns added in from the fish tickets
+```{r}
+colnames(vms_out_clean2)
+```
+<br>
+
+Set date object back to characters for read.csv function
+```{r}
+vms_out_clean2$westcoastdate_notime <- as.character(vms_out_clean2$westcoastdate_notime)
+vms_out_clean2$date <- date(parse_date_time(vms_out_clean2$date, orders=c("Ymd", "mdY")))
+```
+<br>
+
+Write out new VMS file for each year
+```{r vms_out}
+for(i in years){
+  # filter data for VMS entries corresponding to fish tickets for that year
+  vms_out_clean_tmp <- vms_out_clean2 %>% 
+    filter(year(date) == i)
+  # remove date and VMS_lookback_pres columns (were from fishtix data)
+  vms_out_clean_tmp <- select(vms_out_clean_tmp, -c(date, VMS_lookback_pres))
+  write.csv(x=vms_out_clean_tmp, file=paste0(cleanVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_",i,"_cleaned.csv"), row.names=FALSE)
+}
+```
+
+
+
+### Write out VMS data that was removed
+```{r rm_out}
+write.csv(x=vms_out_removed, file=paste0(cleanVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", i, "_removed.csv"), row.names=FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+**Extra Code: If you do not have associated lat/lon for each port.**
+Note that for PRN, Princeton CA is much farther inland than Half Moon Bay wharf. May need to change manually.
+```{r eval=FALSE}
+## Read in list of ports with port codes
+portlist <- read.delim("Input_Data/pacfin_port_codes_all.txt", sep="\t")
+
+## Read in database of city coordinates from https://simplemaps.com/data/us-cities
+cities <- read.csv("Input_Data/uscitiesv1.4.csv")
+
+## Thin out cities database info
+cities_thin <- select(cities, c(city, state_id, lat, lng))
+
+## Join lat/long from cities database to PacFIN
+portlist_coords <- left_join(portlist, cities_thin, by=c("city"="city", "state" = "state_id"))
+
+## Check for NAs
+sum(is.na(portlist_coords$lat))
+
+## investigate those cities
+portlist_coords[which(is.na(portlist_coords$lat)),]
+
+## Manually add in coordinates with google maps. based on central location in marine in each area
+add_coords <- data.frame(cities=c("San Pedro", "Salmon River", "Terminal Island", "Wilmington"),
+                         lat = c(33.725174, NA, 33.737622, 33.766280),
+                         lng = c( -118.281348, NA, -118.268404, -118.249907))
+
+portlist_coords[which(portlist_coords$city == "San Pedro"),c("lat", "lng")] <- add_coords[which(add_coords$cities == "San Pedro"),c("lat", "lng")]
+portlist_coords[which(portlist_coords$city == "Terminal Island"),c("lat", "lng")] <- add_coords[which(add_coords$cities == "Terminal Island"),c("lat", "lng")]
+portlist_coords[which(portlist_coords$city == "Wilmington"),c("lat", "lng")] <- add_coords[which(add_coords$cities == "Wilmington"),c("lat", "lng")]
+
+## Write out for later
+write.csv(x=portlist_coords,file="Input_Data/pacfin_port_codes_wcoords_all.csv")
+```
+

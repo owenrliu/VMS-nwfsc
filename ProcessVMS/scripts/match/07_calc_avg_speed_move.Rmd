@@ -1,0 +1,340 @@
+---
+title: "Calculate Average Speed"
+output: html_document
+---
+
+12/21/2018
+This script calculates the average speed for each VMS record, using the package `move`. It is meant to be run on the VMS records that have already been matched to fish tickets. In order to calculate average speed, the script also has to remove duplicated VMS records (i.e., same time stamp for same vessel.)
+
+
+<br>
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS-repo") 
+getwd()
+```
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r}
+library(lubridate)
+library(ggplot2)
+library(move)
+library(dplyr)
+```
+
+Input variables
+```{r}
+vmsdir <- "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+years <- c(2012)
+max_speed <- 20 # in m/s
+```
+<br>
+
+
+### Read in data
+First, the cleaned VMS data
+```{r read}
+vmsdat <- read.csv(paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", years[1],"_cleaned.csv"))
+if(length(years) > 1){
+  for(i in years[2:length(years)])
+  tmp_vmsdat <- read.csv(paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", i,"_cleaned.csv"))
+  if(length(colnames(vmsdat)) == length(colnames(tmp_vmsdat))){
+    vmsdat <- rbind(vmsdat, tmp_vmsdat)
+  } else(message("ERROR: dimensions of new VMS data do not match dimensions of previous VMS data."))
+}
+```
+<br>
+
+
+### Convert to `move` data frame
+
+Trip as ID, using the UTCDATETM as the date object (using westcoastdate causes issues with duplicates from daylight savings times.)
+
+#### Ensure that R recognises the timestamp as a POSIXct class
+```{r}
+vmsdat$UTCDATETIM <- ymd_hms(vmsdat$UTCDATETIM, tz= "UTC")
+class(vmsdat$UTCDATETIM)
+```
+<br>
+
+
+#### Deal with duplicates
+
+Ensure that there are no duplicated time stamps under the same Rec_ID
+```{r duplicates1}
+dim(vmsdat)
+vmsdat_nodup <- vmsdat[!duplicated(vmsdat[,c("Rec_ID", "UTCDATETIM")]),]
+dim(vmsdat_nodup)
+
+cat("Proportion of VMS records removed for being true duplicate records:", 1-dim(vmsdat_nodup)[1]/dim(vmsdat)[1])
+```
+<br>
+
+Create a file with the duplicate entries to understand what data is being removed!
+```{r duplicates2}
+vmsdat_dup <- rbind(vmsdat[duplicated(vmsdat[,c("Rec_ID","UTCDATETIM")], fromLast = FALSE),],
+                       vmsdat[duplicated(vmsdat[,c("Rec_ID","UTCDATETIM")], fromLast = TRUE),])
+vmsdat_dup_positions <- rbind(vmsdat[duplicated(vmsdat[,c("Rec_ID","UTCDATETIM", "LATITUDE", "LONGITUDE")], fromLast = FALSE),],
+                       vmsdat[duplicated(vmsdat[,c("Rec_ID","UTCDATETIM", "LATITUDE", "LONGITUDE")], fromLast = TRUE),])
+
+dim(vmsdat_dup)[1] / dim(vmsdat)[1]
+dim(vmsdat_dup_positions)[1] / dim(vmsdat)[1]
+
+
+
+vmsdat_dup_sorted <- vmsdat_dup %>% arrange(Rec_ID, UTCDATETIM)
+for(i in seq(1, length(years))){
+  tmp_out <- filter(vmsdat_dup, year(UTCDATETIM) == years[i])
+  write.csv(x=tmp_out, paste0("ProcessVMS/R_Output/quality/VMS", as.character(years[i]), "_Outputs_wTarget_cleaned_DUPLICATES.csv"))
+}
+```
+For the run 9/26 with 2009-2012 data, the duplicates appear to be repeat records with the same VMS record number / trip ID. Implies that at some point in the prep script, the records for the same trip / day / VMS point are being duplicated??
+<br>
+
+Change unavailable declarations to "NA"
+```{r}
+vmsdat_nodup$DECLARATIO[vmsdat_nodup$DECLARATIO == "N/A"] <- NA
+```
+<br>
+
+Order the timestamps within each trip
+```{r}
+vmsdat_nodup <- vmsdat_nodup %>%
+  arrange(Rec_ID, UTCDATETIM)
+```
+<br>
+
+
+x/y utm coordinates, if not already in data
+*utm zone 10 covers most of the west coast, EXCEPT for any coordinates below a longitude of -119.98718261719*
+```{r}
+if(sum(is.na(vmsdat_nodup$X_COORD)) > 1){
+  vmsdat_xy <- vmsdat_nodup
+  coordinates(vmsdat_xy) <- c("LONGITUDE", "LATITUDE") 
+  proj4string(vmsdat_xy) <- CRS("+init=epsg:4326") # WGS 84
+  vmsdat_xy <- spTransform(vmsdat_xy, CRSobj = CRS("+init=epsg:32610"))
+  vmsdat_xy <- as.data.frame(coordinates(vmsdat_xy))
+  colnames(vmsdat_xy) <- c("X_COORD", "Y_COORD")
+  
+  vmsdat_nodup[,"X_COORD"] <- vmsdat_xy$X_COORD
+  vmsdat_nodup[,"Y_COORD"] <- vmsdat_xy$Y_COORD
+}
+```
+<br>
+
+Create `MoveStack` object
+```{r movestack}
+start.time <- Sys.time()
+movedat <- move(x=vmsdat_nodup$X_COORD,
+                y=vmsdat_nodup$Y_COORD,
+                time=vmsdat_nodup$UTCDATETIM,
+                data=vmsdat_nodup,
+                proj=sp::CRS("+init=epsg:32610"),
+                animal=vmsdat_nodup$Rec_ID)
+Sys.time() - start.time
+```
+<br>
+
+
+### Calculate distance / time between VMS records
+Use `timeLag` to get the amount of time that has elapsed between each successive VMS record, and `distance` to get the distance between each successive VMS record.
+```{r calc_steps}
+start.time <- Sys.time()
+timestep <- timeLag(movedat, units="secs")
+diststep <- distance(movedat)
+Sys.time() - start.time
+```
+
+Add to movestack
+```{r add_steps}
+movedat$dt <- unlist(lapply(timestep, c, NA))
+movedat$dx <- unlist(lapply(diststep , c, NA))
+```
+<br>
+
+Turn it back into a data frame
+```{r to_df}
+vmsdat_move <- as.data.frame(movedat)
+vmsdat_move <- vmsdat_move %>%
+  dplyr::select(c(Port_Of_Landing, Rec_ID, LATITUDE, LONGITUDE, UTCDATETIM, dt, dx)) %>%
+  arrange(Rec_ID, UTCDATETIM)
+head(vmsdat_move)
+```
+<br>
+
+
+### Average speed calculations
+
+Use `dist` and `dt` between each time step to calculate average speed for each record
+```{r calc_speed}
+vmsdat_move <- vmsdat_move %>%
+  mutate(avg_speed_ms = dx/dt)
+```
+<br>
+
+Join average speeds back into the original vms data frame
+```{r}
+vmsdat_move$Rec_ID  <- as.character(vmsdat_move$Rec_ID)
+vmsdat_nodup$Rec_ID <- as.character(vmsdat_nodup$Rec_ID)
+vmsdat_ext <- left_join(vmsdat_nodup, vmsdat_move, by=c("Rec_ID", "Port_Of_Landing","UTCDATETIM", "LATITUDE", "LONGITUDE"))
+colnames(vmsdat_ext)
+```
+<br>
+
+How do the calculated speeds compare to the recorded speeds?
+```{r}
+vmsdat_speed_comparison <- vmsdat_ext %>%
+  dplyr::select(Rec_ID, Port_Of_Landing, AVG_SPEED, avg_speed_ms) %>%
+  mutate(diff.speed = abs(AVG_SPEED - avg_speed_ms))
+myplot <- ggplot(vmsdat_speed_comparison, aes(y=diff.speed, x = Port_Of_Landing)) +
+  geom_boxplot() + 
+  ylab("m/s") +
+  ggtitle("Difference between Recorded & Calculated Average Speed.") +
+  theme(axis.text.x = element_text(angle=90, hjust=1))
+print(myplot)
+png(paste0(vmsdir, years[1], "_diff_recorded_avg_speed.png"))
+print(myplot)
+dev.off()
+```
+<br>
+```{r}
+myplot <- ggplot(vmsdat_speed_comparison, aes(y=diff.speed, x = Port_Of_Landing)) +
+  geom_boxplot(outlier.shape=NA) + 
+  ylab("m/s") +
+  ggtitle("Difference between Recorded & Calculated Average Speed.") +
+  theme(axis.text.x = element_text(angle=90, hjust=1)) +
+  ylim(c(0,10))
+png(paste0(vmsdir, years[1], "_diff_recorded_avg_speed_outliersNA.png"))
+print(myplot)
+dev.off()
+```
+<br>
+
+How reasonable are the calculated average speeds?
+```{r}
+ggplot(vmsdat_speed_comparison, aes(y=avg_speed_ms, x = Port_Of_Landing)) +
+  geom_boxplot() + 
+  ylab("m/s") +
+  ggtitle("Calculated Average Speed.") +
+  theme(axis.text.x = element_text(angle=90, hjust=1))
+```
+<br>
+```{r}
+myplot <- ggplot(vmsdat_speed_comparison, aes(y=avg_speed_ms, x = Port_Of_Landing)) +
+  geom_boxplot() + 
+  ylab("m/s") +
+  ggtitle("Calculated Average Speed.") +
+  theme(axis.text.x = element_text(angle=90, hjust=1)) +
+  ylim(c(0,max_speed))
+png(paste0(vmsdir, years[1], "_calc_avg_speed_within_max.png"))
+print(myplot)
+dev.off()
+```
+
+### Carry over reported average speed for first VMS record in each trip
+Since dist = 0 for the first VMS record of each trip, the calculated average speed will be `NA`. However, there should be a reported average speed available that I can carry over into the calculated speed column. This is necessary for the filtering of in-port records. 
+
+```{r speed_first_record}
+vmsdat_ext <- vmsdat_ext %>%
+  mutate(avg_speed_ms = ifelse(!is.na(avg_speed_ms), avg_speed_ms, AVG_SPEED))
+```
+<br>
+
+### Filter out average speed > XX
+
+Only if the dt is not NA; if it is NA, this is the last record of the trip, and we are just using the (possibly wrong) recorded speed.
+```{r}
+vmsdat_out <- vmsdat_ext %>%
+  filter(avg_speed_ms < max_speed & !is.na(dt))
+vmsdat_removed <- vmsdat_ext %>%
+  filter(avg_speed_ms >= max_speed & !is.na(dt))
+cat("Removed ", (dim(vmsdat_removed)[1]) / dim(vmsdat_ext)[1] * 100, "% of VMS records over the speed cutoff of ", max_speed, ".\n")
+```
+Distribution of removed records
+```{r}
+ggplot(vmsdat_removed, aes(x=avg_speed_ms)) +
+  geom_histogram()
+```
+<br>
+
+### Write out
+
+Output
+```{r write}
+vmsdat_thin <- vmsdat_out %>%
+  dplyr::select(Rec_ID, DOCNUM, UTCDATETIM, LATITUDE, LONGITUDE, VESSEL_NAM, AVG_SPEED, 
+                AVG_COURSE, DECLARATIO, NGDC_M, X_COORD, Y_COORD, VMS_RECNO, 
+                westcoastdate, westcoastdate_notime, TARGET, Port_Of_Landing, TARGET_max,
+                dx, dt, avg_speed_ms)
+vmsdat_thin$westcoastdate <- ymd_hms(vmsdat_thin$westcoastdate, tz="America/Los_Angeles")
+for(i in seq(1, length(years))){
+  tmp_out <- filter(vmsdat_thin, year(westcoastdate) == years[i])
+  write.csv(tmp_out, paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", years[i],"_speed_cleaned.csv"), row.names=FALSE)
+}
+```
+<br>
+
+Removed records
+```{r}
+write.csv(vmsdat_removed, paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", years[1], "_speed_cleaned_HighSpeedRemoved.csv"), row.names=FALSE)
+```
+
+
+
+
+### OPTIONAL VERIFICATION: Compare to `ltraj` object
+```{r eval=FALSE}
+library(adehabitatLT)
+#Subset the first 100 trips
+vmsdat_nodup_subset <- vmsdat_nodup %>%
+  filter(Rec_ID %in% unique(vmsdat_nodup$Rec_ID)[1:100])
+
+#Create `ltraj` object.
+vms_ltraj <- adehabitatLT::as.ltraj(xy=vmsdat_nodup_subset[,c("X_COORD","Y_COORD")], 
+                date=vmsdat_nodup_subset$UTCDATETIM, 
+                id=vmsdat_nodup_subset$Rec_ID)
+
+#Turn it back into a data frame
+ltraj_df <- ld(vms_ltraj)
+ltraj_df <- ltraj_df %>%
+  mutate(avg_speed_ms = dist/dt)
+
+#grab columns of interest
+ltraj_thin <- ltraj_df %>%
+  dplyr::select(id, date, x, y, dist, dt, avg_speed_ms)
+colnames(ltraj_thin) <- c("Rec_ID", "UTCDATETIM", "X_COORD", "Y_COORD", "dx_ltraj", "dt_ltraj", "avg_speed_ltraj")
+move_thin <- vmsdat_out %>%
+  dplyr::select(Rec_ID, UTCDATETIM, X_COORD, Y_COORD, dx, dt, avg_speed_ms) %>%
+  filter(Rec_ID %in% unique(ltraj_thin$Rec_ID))
+colnames(move_thin) <- c("Rec_ID", "UTCDATETIM", "X_COORD", "Y_COORD", "dx_move", "dt_move", "avg_speed_move")
+
+
+#join
+compare_vms <- left_join(move_thin, ltraj_thin, by=c("Rec_ID", "UTCDATETIM", "X_COORD", "Y_COORD"))
+
+#compare dx/dt/avg_speed
+compare_vms <- compare_vms %>%
+  mutate(compare_dx = dx_ltraj-dx_move,
+         compare_dt = dt_ltraj-dt_move)
+ggplot(compare_vms, aes(y=compare_dx)) +
+  geom_boxplot()
+ggplot(compare_vms, aes(y=compare_dt)) +
+  geom_boxplot()
+```
+
+
+
+
+
+
+
+
+
+
+

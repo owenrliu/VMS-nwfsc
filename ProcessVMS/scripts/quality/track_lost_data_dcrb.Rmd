@@ -1,0 +1,124 @@
+---
+title: "Data Removed at Each Filtering Step"
+output: html_document
+---
+
+This script tracks VMS data removed at each filtering step. This includes the percent of trips in the data, as well as the percent of records per trip.
+
+
+
+<br>
+```{r "setup", include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/VMS-repo") 
+getwd()
+```
+
+### Prep for running code
+Clear workspace
+```{r}
+rm(list=ls())
+```
+<br>
+
+Install packages
+```{r}
+library(lubridate)
+library(ggplot2)
+library(move)
+library(dplyr)
+```
+
+Input variables
+```{r}
+origdir <- "ProcessVMS/R_Output/match/unfiltered/"
+cleandir <- "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+regdir <- "ProcessVMS/R_Output/interpolation/"
+years <- c(2010,2016,2017)
+```
+<br>
+
+### Calculate data removed at each filtering step
+
+```{r}
+for(y in years){
+  orig <- read.csv(paste0(origdir, "VMS_Outputs_wTARGET_10d_lookback_", y, "_all.csv"))
+  orig <- orig[!duplicated(orig[,c("Rec_ID", "UTCDATETIM", "LATITUDE", "LONGITUDE")]),]
+  orig <- filter(orig, TARGET_max == "DCRB")
+  orig_trips <- data.frame(step="matched",
+                              n.trips = length(unique(orig$Rec_ID)))
+  orig_records <- orig %>%
+    group_by(Rec_ID) %>%
+    summarise(n.rec = n()) %>%
+    mutate(step="matched")
+  # dist between last vms record and port of landing (trips)
+  clean1 <- read.csv(paste0(cleandir, "VMS_Outputs_wTARGET_10d_lookback_", y, "_cleaned.csv"))
+  clean1 <- filter(clean1, TARGET_max == "DCRB")
+  clean1_trips <- data.frame(step="portdist_1",
+                              n.trips = length(unique(clean1$Rec_ID)))
+  clean1_records <- clean1 %>%
+    group_by(Rec_ID) %>%
+    summarise(n.rec=n()) %>%
+    mutate(step="portdist_1")
+  # records with high speeds removed (records)
+  clean2 <- read.csv(paste0(cleandir, "VMS_Outputs_wTARGET_10d_lookback_", y, "_speed_cleaned.csv"))
+  clean2 <- filter(clean2, TARGET_max == "DCRB")
+  clean2_trips <- data.frame(step="speed_2",
+                              n.trips = length(unique(clean2$Rec_ID)))
+  clean2_records <- clean2 %>%
+    group_by(Rec_ID) %>%
+    summarise(n.rec=n()) %>%
+    mutate(step="speed_2")
+  # in port records (records)
+  clean3 <- read.csv(paste0(cleandir, "VMS_Outputs_wTARGET_10d_lookback_", y, "_speed_cleaned_offshore.csv"))
+  clean3 <- filter(clean3, TARGET_max == "DCRB")
+  clean3_trips <- data.frame(step="inport_3",
+                              n.trips = length(unique(clean3$Rec_ID)))
+  clean3_records <- clean3 %>%
+    group_by(Rec_ID) %>%
+    summarise(n.rec=n()) %>%
+    mutate(step="inport_3")
+  # large data gaps (records)
+  clean4 <- read.csv(paste0(regdir, "VMS_Outputs_wTARGET_10d_lookback_", y, "_final_cleaned.csv"))
+  clean4 <- filter(clean4, TARGET_max == "DCRB")
+  clean4_trips <- data.frame(step="time_4",
+                              n.trips = length(unique(clean4$Rec_ID)))
+  clean4_records <- clean4 %>%
+    group_by(Rec_ID) %>%
+    summarise(n.rec=n()) %>%
+    mutate(step="time_4")
+  
+  # bind data frames
+  nrecords <- rbind(orig_records, clean1_records, clean2_records, clean3_records, clean4_records)
+  ntrips <- rbind(orig_trips, clean1_trips, clean2_trips, clean3_trips, clean4_trips)
+  
+  ntrips <- ntrips %>%
+    mutate(p.trips = n.trips/ntrips$n.trips[ntrips$step=="matched"] * 100)
+  
+  print(ntrips)
+  # plot
+  myplot <- ggplot(ntrips, aes(x=step, y=n.trips))+
+    geom_col() +
+    xlab("Step") +
+    ylab("Number of Trips") +
+    ggtitle(paste0(y, ", D.crab Trips"))
+  print(myplot)
+  myplot <- ggplot(ntrips, aes(x=step, y=p.trips))+
+    geom_col() +
+    xlab("Step") +
+    ylab("Percent of Matched Trips") +
+    ggtitle(paste0(y, ", D.crab Trips"))
+  print(myplot)
+  myplot <- ggplot(nrecords, aes(y=n.rec, x=factor(step, levels=c("matched", "portdist_1", "speed_2", "inport_3", "time_4")))) +
+    geom_boxplot() +
+    xlab("Number of Records per Trip") +
+    ggtitle(paste0(y, ", D.crab Trips"))
+  print(myplot)
+  myplot <- ggplot(data=filter(nrecords, n.rec<100), aes(y=n.rec, x=factor(step, levels=c("matched", "portdist_1", "speed_2", "inport_3", "time_4")))) +
+    geom_boxplot() +
+    xlab("Number of Records per Trip") +
+    ggtitle(paste0(y, ", D.crab Trips"))
+  print(myplot)
+}
+```
+<br>
+
