@@ -35,24 +35,22 @@ Install packages
 #install.packages("tidyr")
 #install.packages("lubridate") #https://rstudio-pubs-static.s3.amazonaws.com/28038_1bcb9aa80ca84f27ace07d612872861a.html
 
+library(tidyverse)
 library(foreign)
-library(dplyr)
-library(tidyr)
-library(lubridate) #https://rstudio-pubs-static.s3.amazonaws.com/28038_1bcb9aa80ca84f27ace07d612872861a.html
-library(ggplot2)
+library(here)
 ```
 <br>
 
 Create Objects / Data Frames
 ```{r}
 ## directory where Blake's processed VMS data is stored as .dbf files
-origVMS_dir = "ProcessVMS/R_Output/match/unfiltered/"
-
+# origVMS_dir = "ProcessVMS/R_Output/match/unfiltered/"
+origVMS_dir = "C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/owen processed/"
 ## directory where processed fish ticket data is stored as .csv file
-cleanVMS_dir = "ProcessVMS/R_Output/match/unfiltered/cleaned/"
-
+# cleanVMS_dir = "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+cleanVMS_dir = "C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/owen processed/clean/"
 ## calendar years
-years <- c(2011)
+years <- c(2009)
 ```
 <br>
 
@@ -60,14 +58,15 @@ years <- c(2011)
 
 First, the full vms data set
 ```{r data}
-vms_out <- read.csv(paste0(origVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_",years[1],"_all.csv"))
+# Owen note: using read_csv here to ensure the data types of different variables are read in correctly
+vms_out <- read_csv(paste0(origVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_",years[1],"_all.csv"),col_types='TdddcdiccdddTDccicDc')
 
-if(length(years) > 1){
-  for(i in seq(2:length(years))){
-    vms_out_tmp <- read.csv(paste0(origVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_",years[i],"_all.csv"))
-    vms_out <- rbind(vms_out, vms_out_tmp)
-  }
-}
+# if(length(years) > 1){
+#   for(i in seq(2:length(years))){
+#     vms_out_tmp <- read.csv(paste0(origVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_",years[i],"_all.csv"))
+#     vms_out <- rbind(vms_out, vms_out_tmp)
+#   }
+# }
 ```
 ```{r}
 dim(vms_out)
@@ -165,15 +164,13 @@ if(dim(vms_duplicated)[1] == 0){
 <br>
 ____________
 
-
-
 ### Remove trips where Port of Landing > 50km from last VMS data point
 
 #### Get lat/long for every port of landing
 
 These coordinates were provided by Blake Feist.
 ```{r}
-portlist_coords <- read.csv("Input_Data/port_coords_fromBlake.csv")
+portlist_coords <- read.csv(here::here('Input_Data','port_coords_fromBlake_edited.csv'))
 head(portlist_coords)
 ```
 
@@ -242,26 +239,30 @@ cat(length(dcrb_trips_to_remove$Rec_ID) / sum(length(dcrb_trips_to_keep$Rec_ID) 
 About 9% of Dungeness crab trips are removed (2010).
 
 ```{r}
-myplot <- ggplot(data=trips_to_keep %>% select(Rec_ID, Port_Of_Landing) %>% distinct(), aes(x=Port_Of_Landing)) +
+retained_trips_plot <- trips_to_keep %>% 
+  select(Rec_ID, Port_Of_Landing) %>% 
+  distinct() %>% 
+  ggplot(aes(x=Port_Of_Landing)) +
   geom_bar() +
-  theme(axis.text.x = element_text(angle=90)) +
-  ylab("Number of Unique Trips") +
-  ggtitle("Trips <= 50km")
-print(myplot)
-png(paste0(cleanVMS_dir, "freq_retained_trips_byport.png"))
-print(myplot)
-dev.off()
+  labs(x="Port",y="Number of Unique Trips",title="Trips <= 50km")+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle=90))
+retained_trips_plot
+ggsave(paste0(cleanVMS_dir, "freq_retained_trips_byport.png"),retained_trips_plot)
 ```
 ```{r}
-myplot <- ggplot(data=trips_to_remove %>% select(Rec_ID, Port_Of_Landing) %>% distinct(), aes(x=Port_Of_Landing)) +
+trips_removed_plot <- trips_to_remove %>% 
+  select(Rec_ID, Port_Of_Landing) %>% 
+  distinct() %>% 
+  ggplot(data=, aes(x=Port_Of_Landing)) +
   geom_bar() +
+  theme_minimal()+
   theme(axis.text.x = element_text(angle=90)) +
-  ylab("Number of Unique Trips") +
-  ggtitle("Trips > 50km")
-print(myplot)
-png(paste0(cleanVMS_dir, "freq_removed_trips_byport.png"))
-print(myplot)
-dev.off()
+  labs(x='Port',y="Number of Trips Removed",title="Trips >50km")
+
+trips_removed_plot
+ggsave(paste0(cleanVMS_dir, "freq_remove_trips_byport.png"),trips_removed_plot)
+
 ```
 
 
@@ -292,7 +293,7 @@ for(i in years){
   # filter data for VMS entries corresponding to fish tickets for that year
   fishtix_out_edit_tmp <- fishtix_out_edit %>% 
     filter(year(date) == i)
-  write.csv(x=fishtix_out_edit_tmp, file=paste0(cleanVMS_dir,"FishTix_wVMS_10d_lookback_",i,"_VMSedit.csv"), row.names=FALSE)
+  write_csv(x=fishtix_out_edit_tmp, path=paste0(cleanVMS_dir,"FishTix_wVMS_10d_lookback_",i,"_VMSedit.csv"))
 }
 ```
 
@@ -306,8 +307,9 @@ colnames(vms_out_clean2)
 
 Set date object back to characters for read.csv function
 ```{r}
-vms_out_clean2$westcoastdate_notime <- as.character(vms_out_clean2$westcoastdate_notime)
-vms_out_clean2$date <- date(parse_date_time(vms_out_clean2$date, orders=c("Ymd", "mdY")))
+# Owen note- not doing this for now and instead using write_csv and read_csv
+# vms_out_clean2$westcoastdate_notime <- as.character(vms_out_clean2$westcoastdate_notime)
+# vms_out_clean2$date <- date(parse_date_time(vms_out_clean2$date, orders=c("Ymd", "mdY")))
 ```
 <br>
 
@@ -319,7 +321,7 @@ for(i in years){
     filter(year(date) == i)
   # remove date and VMS_lookback_pres columns (were from fishtix data)
   vms_out_clean_tmp <- select(vms_out_clean_tmp, -c(date, VMS_lookback_pres))
-  write.csv(x=vms_out_clean_tmp, file=paste0(cleanVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_",i,"_cleaned.csv"), row.names=FALSE)
+  write_csv(x=vms_out_clean_tmp, path=paste0(cleanVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_",i,"_cleaned.csv"))
 }
 ```
 
@@ -327,26 +329,9 @@ for(i in years){
 
 ### Write out VMS data that was removed
 ```{r rm_out}
-write.csv(x=vms_out_removed, file=paste0(cleanVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", i, "_removed.csv"), row.names=FALSE)
+write_csv(x=vms_out_removed, path=paste0(cleanVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", i, "_removed.csv"))
 ```
 
-
-
-
-
-
-
-
-
-
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
 **Extra Code: If you do not have associated lat/lon for each port.**
 Note that for PRN, Princeton CA is much farther inland than Half Moon Bay wharf. May need to change manually.
 ```{r eval=FALSE}

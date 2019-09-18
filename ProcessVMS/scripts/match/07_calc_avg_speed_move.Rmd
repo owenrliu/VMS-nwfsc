@@ -22,16 +22,14 @@ rm(list=ls())
 
 Install packages
 ```{r}
-library(lubridate)
-library(ggplot2)
+library(tidyverse)
 library(move)
-library(dplyr)
 ```
 
 Input variables
 ```{r}
-vmsdir <- "ProcessVMS/R_Output/match/unfiltered/cleaned/"
-years <- c(2012)
+vmsdir <- "C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/owen processed/clean/"
+years <- c(2009)
 max_speed <- 20 # in m/s
 ```
 <br>
@@ -40,10 +38,10 @@ max_speed <- 20 # in m/s
 ### Read in data
 First, the cleaned VMS data
 ```{r read}
-vmsdat <- read.csv(paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", years[1],"_cleaned.csv"))
+vmsdat <- read_csv(paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", years[1],"_cleaned.csv"),col_types = 'dcTdddcddcdddTDccc')
 if(length(years) > 1){
   for(i in years[2:length(years)])
-  tmp_vmsdat <- read.csv(paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", i,"_cleaned.csv"))
+  tmp_vmsdat <- read_csv(paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", i,"_cleaned.csv"))
   if(length(colnames(vmsdat)) == length(colnames(tmp_vmsdat))){
     vmsdat <- rbind(vmsdat, tmp_vmsdat)
   } else(message("ERROR: dimensions of new VMS data do not match dimensions of previous VMS data."))
@@ -89,10 +87,10 @@ dim(vmsdat_dup_positions)[1] / dim(vmsdat)[1]
 
 
 vmsdat_dup_sorted <- vmsdat_dup %>% arrange(Rec_ID, UTCDATETIM)
-for(i in seq(1, length(years))){
-  tmp_out <- filter(vmsdat_dup, year(UTCDATETIM) == years[i])
-  write.csv(x=tmp_out, paste0("ProcessVMS/R_Output/quality/VMS", as.character(years[i]), "_Outputs_wTarget_cleaned_DUPLICATES.csv"))
-}
+# for(i in seq(1, length(years))){
+#   tmp_out <- filter(vmsdat_dup, year(UTCDATETIM) == years[i])
+#   write.csv(x=tmp_out, paste0("ProcessVMS/R_Output/quality/VMS", as.character(years[i]), "_Outputs_wTarget_cleaned_DUPLICATES.csv"))
+# }
 ```
 For the run 9/26 with 2009-2012 data, the duplicates appear to be repeat records with the same VMS record number / trip ID. Implies that at some point in the prep script, the records for the same trip / day / VMS point are being duplicated??
 <br>
@@ -106,9 +104,9 @@ vmsdat_nodup$DECLARATIO[vmsdat_nodup$DECLARATIO == "N/A"] <- NA
 Order the timestamps within each trip
 ```{r}
 vmsdat_nodup <- vmsdat_nodup %>%
-  arrange(Rec_ID, UTCDATETIM)
+  arrange(Rec_ID, UTCDATETIM) %>% 
+  as.data.frame()
 ```
-<br>
 
 
 x/y utm coordinates, if not already in data
@@ -192,29 +190,35 @@ How do the calculated speeds compare to the recorded speeds?
 vmsdat_speed_comparison <- vmsdat_ext %>%
   dplyr::select(Rec_ID, Port_Of_Landing, AVG_SPEED, avg_speed_ms) %>%
   mutate(diff.speed = abs(AVG_SPEED - avg_speed_ms))
-myplot <- ggplot(vmsdat_speed_comparison, aes(y=diff.speed, x = Port_Of_Landing)) +
+vms_speed_comp_plot1 <- ggplot(vmsdat_speed_comparison, aes(y=diff.speed, x = Port_Of_Landing)) +
   geom_boxplot() + 
   ylab("m/s") +
   ggtitle("Difference between Recorded & Calculated Average Speed.") +
   theme(axis.text.x = element_text(angle=90, hjust=1))
-print(myplot)
-png(paste0(vmsdir, years[1], "_diff_recorded_avg_speed.png"))
-print(myplot)
-dev.off()
+vms_speed_comp_plot1
+ggsave(paste0(vmsdir, "vms_speed_comp.png"),vms_speed_comp_plot1)
+
+vms_speed_comp_plot2 <- ggplot(vmsdat_speed_comparison, aes(y=AVG_SPEED, x = avg_speed_ms)) +
+  geom_point() + geom_smooth(method='lm',se=F)+
+  geom_abline(intercept=0,slope=1)+
+  labs(y="Recorded",x="Calculated",title="Recorded vs. Calculated Speeds")
+vms_speed_comp_plot2
+ggsave(paste0(vmsdir, "vms_speed_comp2.png"),vms_speed_comp_plot2)
+
+fivenum(vmsdat_speed_comparison$diff.speed)
 ```
 <br>
 ```{r}
-myplot <- ggplot(vmsdat_speed_comparison, aes(y=diff.speed, x = Port_Of_Landing)) +
-  geom_boxplot(outlier.shape=NA) + 
-  ylab("m/s") +
-  ggtitle("Difference between Recorded & Calculated Average Speed.") +
-  theme(axis.text.x = element_text(angle=90, hjust=1)) +
-  ylim(c(0,10))
-png(paste0(vmsdir, years[1], "_diff_recorded_avg_speed_outliersNA.png"))
-print(myplot)
-dev.off()
+# myplot <- ggplot(vmsdat_speed_comparison, aes(y=diff.speed, x = Port_Of_Landing)) +
+#   geom_boxplot(outlier.shape=NA) + 
+#   ylab("m/s") +
+#   ggtitle("Difference between Recorded & Calculated Average Speed.") +
+#   theme(axis.text.x = element_text(angle=90, hjust=1)) +
+#   ylim(c(0,10))
+# png(paste0(vmsdir, years[1], "_diff_recorded_avg_speed_outliersNA.png"))
+# print(myplot)
+# dev.off()
 ```
-<br>
 
 How reasonable are the calculated average speeds?
 ```{r}
@@ -224,17 +228,18 @@ ggplot(vmsdat_speed_comparison, aes(y=avg_speed_ms, x = Port_Of_Landing)) +
   ggtitle("Calculated Average Speed.") +
   theme(axis.text.x = element_text(angle=90, hjust=1))
 ```
-<br>
+
+
 ```{r}
-myplot <- ggplot(vmsdat_speed_comparison, aes(y=avg_speed_ms, x = Port_Of_Landing)) +
-  geom_boxplot() + 
-  ylab("m/s") +
-  ggtitle("Calculated Average Speed.") +
-  theme(axis.text.x = element_text(angle=90, hjust=1)) +
-  ylim(c(0,max_speed))
-png(paste0(vmsdir, years[1], "_calc_avg_speed_within_max.png"))
-print(myplot)
-dev.off()
+# myplot <- ggplot(vmsdat_speed_comparison, aes(y=avg_speed_ms, x = Port_Of_Landing)) +
+#   geom_boxplot() + 
+#   ylab("m/s") +
+#   ggtitle("Calculated Average Speed.") +
+#   theme(axis.text.x = element_text(angle=90, hjust=1)) +
+#   ylim(c(0,max_speed))
+# png(paste0(vmsdir, years[1], "_calc_avg_speed_within_max.png"))
+# print(myplot)
+# dev.off()
 ```
 
 ### Carry over reported average speed for first VMS record in each trip
@@ -242,7 +247,7 @@ Since dist = 0 for the first VMS record of each trip, the calculated average spe
 
 ```{r speed_first_record}
 vmsdat_ext <- vmsdat_ext %>%
-  mutate(avg_speed_ms = ifelse(!is.na(avg_speed_ms), avg_speed_ms, AVG_SPEED))
+  mutate(avg_speed_ms = coalesce(avg_speed_ms, AVG_SPEED))
 ```
 <br>
 
@@ -275,14 +280,14 @@ vmsdat_thin <- vmsdat_out %>%
 vmsdat_thin$westcoastdate <- ymd_hms(vmsdat_thin$westcoastdate, tz="America/Los_Angeles")
 for(i in seq(1, length(years))){
   tmp_out <- filter(vmsdat_thin, year(westcoastdate) == years[i])
-  write.csv(tmp_out, paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", years[i],"_speed_cleaned.csv"), row.names=FALSE)
+  write_csv(tmp_out, paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", years[i],"_speed_cleaned.csv"))
 }
 ```
 <br>
 
 Removed records
 ```{r}
-write.csv(vmsdat_removed, paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", years[1], "_speed_cleaned_HighSpeedRemoved.csv"), row.names=FALSE)
+write_csv(vmsdat_removed, paste0(vmsdir,"VMS_Outputs_wTARGET_10d_lookback_", years[1], "_speed_cleaned_HighSpeedRemoved.csv"))
 ```
 
 

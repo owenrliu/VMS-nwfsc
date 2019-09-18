@@ -33,10 +33,10 @@ library(rgdal)
 Create Objects / Data Frames
 ```{r}
 ## directory where filtered VMS data is stored as .csv file
-VMS_dir = "ProcessVMS/R_Output/interpolation/"
+VMS_dir = "C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/owen processed/clean/"
 
 ## calendar years
-years <- c(2015)
+years <- c(2009)
 
 ## recalculate the average speed?
 recalc_speed = TRUE
@@ -339,21 +339,6 @@ Write out as csv
 ```{r}
 write.csv(vms_all, paste0(VMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", y, "_final_cleaned_interpolated_all.csv"), row.names=FALSE)
 ```
-<br>
-
-
-
-
-
-
-
-
-
-
-
-
-
-<br>
 <br>
 
 ________________

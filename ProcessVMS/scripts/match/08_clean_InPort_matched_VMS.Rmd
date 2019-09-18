@@ -33,11 +33,8 @@ Install packages
 #install.packages("tidyr")
 #install.packages("lubridate") #https://rstudio-pubs-static.s3.amazonaws.com/28038_1bcb9aa80ca84f27ace07d612872861a.html
 
+library(tidyverse)
 library(foreign)
-library(dplyr)
-library(tidyr)
-library(lubridate) 
-library(ggplot2)
 library(maps)
 library(rgdal)
 library(rgeos)
@@ -47,16 +44,16 @@ library(rgeos)
 Create Objects / Data Frames
 ```{r}
 ## directory where Blake's processed VMS data is stored as .dbf files
-origVMS_dir = "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+# origVMS_dir = "ProcessVMS/R_Output/match/unfiltered/cleaned/"
 
 ## directory where the filtered VMS data will be written out
-filterVMS_dir = "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+filterVMS_dir = "C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/owen processed/clean/"
 
 ## file with port coordinates, including directory
-coords_file = "Input_Data/port_coords_fromBlake_edited.csv"
+coords_file = here::here('Input_Data','port_coords_fromBlake_edited.csv')
 
 ## calendar years
-years <- c(2011)
+years <- c(2009)
 
 ## width of buffer circle (in meters). applies to all ports but those that require smaller buffers
 r = 3000
@@ -82,7 +79,7 @@ plot.me = FALSE
 
 First, the full vms data set
 ```{r rawdat}
-vms <- read.csv(paste0(origVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", years[1], "_speed_cleaned.csv"))
+vms <- read_csv(paste0(filterVMS_dir,"VMS_Outputs_wTARGET_10d_lookback_", years[1], "_speed_cleaned.csv"),col_types='dcTddcddcddddTDcccddd')
 dim(vms)
 head(vms)
 ```

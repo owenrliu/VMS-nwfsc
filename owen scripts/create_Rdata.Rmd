@@ -1,0 +1,180 @@
+---
+title: "Create VMS RData"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Purpose
+
+We want to combine as much of the VMS/fish ticket data as possible into one, easily importable R data object. In this script, I will import the separate .csvs for both VMS and fish tickets, make sure they are consistent in naming and variable types, and then save the output files.
+
+```{r}
+# Load packages
+library(tidyverse)
+```
+
+# VMS
+
+## Load VMS Data
+
+There are basically three "versions" of the final VMS data for each year:
+
+* `VMS_Outputs_wTARGET_10d_lookback_YEAR_final_cleaned.csv` is the original VMS (cleaned, but with no regularization or interpolation)
+* `VMS_Outputs_wTARGET_10d_lookback_YEAR_final_cleaned_interpolated_regular.csv` is interpolated and regularized
+* `VMS_Outputs_wTARGET_10d_lookback_YEAR_final_cleaned_interpolated_all.csv` is the original plus the interpolated points
+
+```{r import}
+# These are large data files, so this will take awhile
+# base file path on my computer
+fp <- "C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/VMS/"
+years <- 2009:2018
+
+# original cleaned
+for(i in years){
+  tempname <- paste0('orig',i)
+  tempout <- read_csv(paste0(fp,'VMS_Outputs_wTARGET_10d_lookback_',i,'_final_cleaned.csv'),col_types='dcTddcddcddddTDcccdcc')
+  assign(tempname,tempout)
+}
+
+vms_orig_clean <- bind_rows(orig2009,orig2010,orig2011,orig2012,orig2013,orig2014,orig2015,orig2016,orig2017,orig2018)
+```
+
+```{r}
+# cleaned, interpolated, regularized
+rm(list=ls()[!(ls() %in% c('vms_orig_clean','fp','years'))])
+# note: some of these have extra columsn. for now, only keep the lowest common denominator columns
+cols_to_import <- cols_only(
+  Rec_ID="d",
+  DOCNUM='c',
+  UTCDATETIM="T",
+  LATITUDE='d',
+  LONGITUDE='d',
+  VESSEL_NAM='c',
+  DECLARATIO='c',
+  X_COORD='d',
+  Y_COORD='d',
+  westcoastdate='T',
+  westcoastdate_notime='D',
+  avg_speed_recalc='d',
+  TARGET='c',
+  Port_Of_Landing='c',
+  TARGET_max='c',
+  sensor='c',
+  VMS_RECNO='d'
+)
+# col_types='dcTddccddTDdccccd'
+for(i in years){
+  tempname <- paste0('int_reg_',i)
+  tempout <- read_csv(paste0(fp,'VMS_Outputs_wTARGET_10d_lookback_',i,'_final_cleaned_interpolated_regular.csv'),col_types = cols_to_import)
+  assign(tempname,tempout)
+}
+vms_int_reg <- bind_rows(int_reg_2009,int_reg_2010,int_reg_2011,int_reg_2012,int_reg_2013,int_reg_2014,int_reg_2015,int_reg_2016,int_reg_2017,int_reg_2018)
+```
+
+NOTE:: For some reason, 2013 does not have a file for "...cleaned_interpolated_all.csv", so this next set of collected data frames does not include data from 2013.
+
+```{r}
+# cleaned, interpolated, including original points
+rm(list=ls()[!(ls() %in% c('vms_orig_clean','vms_int_reg','fp','years'))])
+years <- c(2009:2012,2014:2018)
+# note: some of these have extra columns. for now, only keep the lowest common denominator columns
+cols_to_import <- cols_only(
+  Rec_ID="d",
+  DOCNUM='c',
+  UTCDATETIM="T",
+  LATITUDE='d',
+  LONGITUDE='d',
+  VESSEL_NAM='c',
+  AVG_SPEED='d',
+  AVG_COURSE='d',
+  DECLARATIO='c',
+  NGDC_M='d',
+  X_COORD='d',
+  Y_COORD='d',
+  VMS_RECNO='d',
+  westcoastdate='T',
+  westcoastdate_notime='D',
+  TARGET='c',
+  Port_Of_Landing='c',
+  TARGET_max='c',
+  avg_speed_ms='d',
+  in_port='c',
+  to_rm='c',
+  sensor='c',
+  dt='d',
+  dx='d',
+  dx.y='d',
+  avg_speed_recalc='d'
+)
+# col_types='dcTddccddTDdccccd'
+for(i in years){
+  tempname <- paste0('int_all_',i)
+  tempout <- read_csv(paste0(fp,'VMS_Outputs_wTARGET_10d_lookback_',i,'_final_cleaned_interpolated_all.csv'),col_types = cols_to_import)
+  if("dx.y"%in%colnames(tempout)) {tempout = tempout %>% rename(dx=dx.y)}
+  assign(tempname,tempout)
+}
+vms_int_all <- bind_rows(int_all_2009,int_all_2010,int_all_2011,int_all_2012,int_all_2014,int_all_2015,int_all_2016,int_all_2017,int_all_2018)
+```
+
+## Save VMS Data
+
+Save all fish ticket data as an RData structure.
+
+```{r}
+rm(list=ls()[!(ls() %in% c('vms_orig_clean','vms_int_reg','vms_int_all','fp'))])
+
+save.image(file=paste0(fp,"VMS_2009_2018_clean.RData"))
+```
+
+# Fish Tickets
+
+## Load Fish Ticket Data
+
+Like the matched VMS data, there are a few versions of the processed fish ticket data
+
+* `fish tickets YEAR processed_multispecies03.csv` is after basic processing before VMS matching
+* `FishTix_wVMS_10d_lookback_YEAR.csv` are the VMS-matched fish tickets
+* `FishTix_wVMS_10d_lookback_YEAR_VMSedit.csv` exclude trips the were removed for overly large time gaps
+
+```{r import tix}
+fp_tix <- "C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/Fish tickets/"
+years <- 2009:2018
+
+for(i in years){
+  tempname <- paste0('fishtix_basic_',i)
+  tempout <- read_csv(paste0(fp_tix,'Basic Processing (Step 1 Only)/','fish tickets ',i,' processed_multispecies03.csv'),col_types = cols(drvid='c',gear_code_all='i'))
+  assign(tempname,tempout)
+}
+
+# throws a couple of readr errors here, but they are only in one column (gear code, ) which we do not offically need anyway
+fishtix_basic_all <- bind_rows(fishtix_basic_2009,fishtix_basic_2010,fishtix_basic_2011,fishtix_basic_2012,fishtix_basic_2013,fishtix_basic_2014,fishtix_basic_2015,fishtix_basic_2016,fishtix_basic_2017,fishtix_basic_2018)
+```
+
+Now the VMS-matched tickets
+```{r}
+keeps <- c('vms_orig_clean','vms_int_reg','vms_int_all','fp','fp_tix','years','fishtix_basic_all')
+rm(list=setdiff(ls(),keeps))
+
+for(i in years){
+  tempname <- paste0('fishtix_vms_matched_',i)
+  tempout <- read_csv(paste0(fp_tix,'VMS-Matched (Step 5)/','FishTix_wVMS_10d_lookback_',i,'.csv'),col_types = cols(gear_code_all='i'))
+  assign(tempname,tempout)
+}
+
+# throws a couple of readr errors here, but they are only in one column (gear code, ) which we do not offically need anyway
+fishtix_matched_all <- bind_rows(fishtix_vms_matched_2009,fishtix_vms_matched_2010,fishtix_vms_matched_2011,fishtix_vms_matched_2012,fishtix_vms_matched_2013,fishtix_vms_matched_2014,fishtix_vms_matched_2015,fishtix_vms_matched_2016,fishtix_vms_matched_2017,fishtix_vms_matched_2018)
+```
+
+## Save Fish Ticket Data
+
+Save all fish ticket data as an RData structure.
+
+```{r}
+rm(list=ls()[!(ls() %in% c('fishtix_basic_all','fishtix_matched_all','fp_tix'))])
+
+save.image(file=paste0(fp_tix,"FishTix_all_2009_2018.RData"))
+```
+

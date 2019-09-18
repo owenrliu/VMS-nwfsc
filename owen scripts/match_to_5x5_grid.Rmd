@@ -1,0 +1,168 @@
+---
+title: "Matching VMS Data to Spatial Grid"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Here we match the interpolated VMS points from 2009 to a 5x5 grid provided by Blake Feist.
+
+UPDATE 9/18/19: Using the topological union of multiple regions, not just the 5x5 grid. Because it is now a union, removed plotting of the output (because it's not as useful)
+
+```{r libs,message=FALSE,warning=FALSE}
+library(tidyverse)
+library(sf)
+library(here)
+library(fasterize)
+library(raster)
+library(rnaturalearth)
+library(knitr)
+```
+
+
+## Import Files
+
+```{r}
+# clean, interpolated vms data
+vms <- read_csv("C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/VMS/VMS_Outputs_wTARGET_10d_lookback_2009_final_cleaned_interpolated_regular.csv",col_types='dcTddccddTDdccccd')
+
+# 5x5 grid shapefile
+# grd <- read_sf(here::here("Input_Data","5x5 Grid","five_km_grid_polys_geo.shp"))
+grd <- read_sf(here::here("Input_Data","5x5 Grid","regions_master_final_lamb.shp"))
+names(grd)
+
+meta <- readxl::read_xlsx(here::here("Input_Data","5x5 Grid","regions_master_final_lamb_metadata.xlsx")) 
+
+meta %>% kable()
+
+```
+
+## Match Points
+
+```{r}
+# convert vms to spatial object (longitude/latitude)
+vms_sf <- vms %>%
+  st_as_sf(coords=c('LONGITUDE','LATITUDE'),crs=4326) %>% 
+  # then, convert to planar projection to match the grid
+  st_transform(st_crs(grd))
+
+# do the join
+pt <- proc.time()
+vms_grd_match <- vms_sf %>%
+  st_join(grd)
+proc.time()-pt
+```
+
+## Check
+
+Did the join work? How many unique 5km, 25km, and 50km cells are represented in the 2009 data?
+
+```{r checks}
+names(vms_grd_match)
+
+length(unique(vms_grd_match$GRID5KM_ID))
+
+length(unique(vms_grd_match$BAND_25KM))
+
+length(unique(vms_grd_match$BAND_50KM))
+```
+
+## Plot [UPDATE 9.18.19: NOT RUN]
+
+We can plot the output, with a raster representation of the grid for faster plotting
+
+```{r, eval=FALSE}
+# transform to a projection that uses meters instead of lat/long
+grd_proj <- grd %>% st_transform(32610)
+grd_rast <- fasterize(grd_proj,raster = raster(grd_proj,res=5000),field="GRID5KM_ID")
+# set -99999 to NA
+grd_rast[grd_rast==-99999] <- NA
+
+vms_proj = vms_grd_match %>% st_transform(32610)
+```
+
+Plot points and raster grid
+
+```{r, eval=FALSE}
+# raster to dataframe for plotting
+grd_rast_df <- rasterToPoints(grd_rast) %>% as_tibble() %>% rename(grid_id=layer)
+
+# coastline for plotting
+coast <- ne_states(country='United States of America',returnclass = 'sf') %>% 
+  filter(name %in% c('California','Oregon','Washington')) %>% 
+  st_transform(32610)
+
+bbox_vms <- st_bbox(vms_proj)
+ggplot()+
+  geom_raster(data=grd_rast_df,aes(x,y,fill=grid_id))+
+  geom_sf(data=vms_proj,size=0.5)+
+  scale_fill_continuous(name="5 Km Grid ID")+
+  lims(x=c(bbox_vms[1],bbox_vms[3]),y=c(bbox_vms[2],bbox_vms[4]))
+```
+
+## Write out
+
+```{r write}
+# write a non-spatial version of the joined data
+vms_grd <- vms_grd_match
+st_geometry(vms_grd) <- NULL
+
+write_csv(vms_grd,"C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/VMS/VMS_Outputs_wTARGET_10d_lookback_2009_final_cleaned_interpolated_regular_w_5k_grid.csv")
+```
+
+
+## All Data
+
+Check to see how fast (or slow) it is to match all of the VMS points from all years. For this we will use the combined (interpolated and regularized) data from `create_Rdata.Rmd`.
+
+### Import
+
+```{r import all}
+# clear wrkspace
+rm(list=setdiff(ls(),'grd'))
+
+# load RData
+fp <- "C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/VMS/"
+load(file=paste0(fp,"VMS_2009_2018_clean.RData"))
+```
+
+### Match
+
+```{r}
+# convert VMS to spatial object
+pt <- proc.time()
+vms_all_sf <- vms_int_reg %>%
+  st_as_sf(coords=c('LONGITUDE','LATITUDE'),crs=4326) %>% 
+  # then, convert to planar projection to match the grid
+  st_transform(st_crs(grd))
+proc.time()-pt
+```
+
+Took ~3m to do the conversion. Now for the join...
+
+```{r join to grid}
+# do the join
+pt <- proc.time()
+vms_all_grd_match <- vms_all_sf %>%
+  st_join(grd)
+proc.time()-pt
+```
+
+The join took ~15 minutes.
+
+### Save and Write
+
+```{r}
+saveRDS(vms_all_grd_match,file=paste0(fp,"VMS_int_reg_w_grid.rds"))
+```
+
+
+
+
+
+

@@ -39,10 +39,10 @@ library(move)
 Create Objects / Data Frames
 ```{r}
 ## directory where filtered VMS data is stored as .csv file
-VMS_dir = "ProcessVMS/R_Output/match/unfiltered/cleaned/"
+VMS_dir ="C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/owen processed/clean/"
 
 ## calendar years
-years <- c(2010)
+years <- c(2009)
 ```
 <br>
 
@@ -164,8 +164,8 @@ trips_retained <- vmsdat_maxDT %>%
   dplyr::select(Rec_ID)
 # get the VMS records for those trips
 vms_out <- vms %>%
-  filter(Rec_ID %in% trips_retained$Rec_ID) %>%
-  dplyr::select(-dt, -dist)
+  dplyr::filter(Rec_ID %in% trips_retained$Rec_ID) %>%
+  dplyr::select(-dt,-dx)
 # write out
 for(y in years){
   tmp_out <- filter(vms_out, year(westcoastdate) == y)
@@ -183,7 +183,7 @@ trips_removed <- vmsdat_maxDT %>%
 # get the VMS records for those trips
 vms_removed <- vms %>%
   filter(Rec_ID %in% trips_removed$Rec_ID) %>%
-  dplyr::select(-dt, -dist)
+  dplyr::select(-dt)
 # write out
 for(y in years){
   tmp_out <- filter(vms_removed, year(westcoastdate) == y)
@@ -194,14 +194,14 @@ for(y in years){
 
 Trips marked to remove, but for the second to last record in the trip
 ```{r}
-# trips to retain
+# trips to remove
 trips_removed_tmp <- vmsdat_maxDT %>%
   filter(!(Rec_ID %in% trips_retained$Rec_ID) & ((max_recnum-recnum) == 1)) %>%
   dplyr::select(Rec_ID)
 # get the VMS records for those trips
 vms_removed_tmp <- vms %>%
   filter(Rec_ID %in% trips_removed_tmp$Rec_ID) %>%
-  dplyr::select(-dt, -dist)
+  dplyr::select(-dt)
 # write out
 for(y in years){
   tmp_out <- filter(vms_removed_tmp, year(westcoastdate) == y)

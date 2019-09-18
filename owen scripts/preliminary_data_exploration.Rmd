@@ -1,0 +1,212 @@
+---
+title: "VMS Initial Exploration"
+output: html_document
+---
+
+## Purpose
+
+The goal of this analysis is to do some preliminary explorations and scratch work with the processed VMS data for the west coast Dungeness fishery. We will start with investigating broad trends, followed by trying to identify patterns in the space use of a couple of individual boats. We'll do this with one year (2011, a strong year before the warm blob)
+
+
+## Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libs,message=FALSE}
+library(tidyverse)
+library(sf)
+library(here)
+library(knitr)
+library(extrafont)
+library(rnaturalearth)
+library(lubridate)
+library(ggsci)
+
+# ggplot theme
+plot_theme <-   theme_minimal()+
+  theme(text=element_text(family="Gill Sans MT",size=12,color="black"),
+        legend.text = element_text(size=14),
+        axis.title=element_text(family="sans",size=14,color="black"),
+        axis.text=element_text(family="sans",size=8,color="black"),
+        panel.grid.major = element_line(color="gray50",linetype=3))
+theme_set(plot_theme)
+```
+
+### Import the data
+
+```{r imp}
+vms <- read_csv("C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/VMS/VMS_Outputs_wTARGET_10d_lookback_2011_final_cleaned_interpolated_regular.csv",col_types='dcTddccddTDdccccd')
+
+glimpse(vms)
+paste('There are',length(unique(vms$VMS_RECNO)), 'VMS records in this cleaned and interpolated version of the data, representing',length(unique(vms$Rec_ID)),'trips and',length(unique(vms$DOCNUM)),'vessels.')
+```
+There are `r length(unique(vms$VMS_RECNO))` VMS records in this cleaned and interpolated version of the data, representing `r length(unique(vms$Rec_ID))` trips and `r length(unique(vms$DOCNUM))` vessels.
+
+## Descriptive Plots
+
+We can count the number of VMS records and trips by vessel and by primary target species.
+
+```{r}
+vessel_target_n <- vms %>% 
+  count(DOCNUM,TARGET_max) %>% 
+  arrange(desc(n)) 
+vessel_target_n %>% 
+  slice(1:50) %>% 
+  kable(col.names = c('Vessel','Target','VMS recs'))
+
+# For DCRB only, the top 50 vessels by number of VMS records
+vessel_targ_n_dcrb <- vms %>% 
+  filter(TARGET_max=="DCRB") %>% 
+  count(DOCNUM,TARGET_max) %>% 
+  arrange(desc(n))
+vessel_targ_n_dcrb %>% 
+  slice(1:50) %>% 
+  kable(col.names=c('Vessel','Target','VMS_recs'))
+```
+
+### Representation in the Data
+
+What is the distribution of number of trips and VMS records for all of the DCRB vessels in the data?
+
+```{r}
+vms_dcrb <- vms %>% 
+  filter(TARGET_max=="DCRB")
+
+vms_dcrb_summ <- vms_dcrb %>% 
+  group_by(DOCNUM) %>% 
+  summarise(n_trips=n_distinct(Rec_ID),n_vms=n_distinct(VMS_RECNO))
+
+# Distribution of number of trips by vessel
+dcrb_trips_plot <- vms_dcrb_summ %>% 
+  ggplot(aes(n_trips))+
+  geom_histogram(bins=20,fill='black',col='white')+
+  labs(x='Number of Trips in 2011',y='Number of Vessels',title="Distribution of Number of Trips\n2011 DCRB Vessels")
+dcrb_trips_plot
+
+dcrb_vmsrecs_plot <- vms_dcrb_summ %>% 
+  ggplot(aes(n_vms))+
+  geom_histogram(bins=20,fill='black',col='white')+
+  labs(x='Number of VMS records in 2011',y='Number of Vessels',title="Distribution of Number of VMS Records\n2011 DCRB Vessels")
+dcrb_vmsrecs_plot
+```
+
+### Single vs. Multi-target Trips
+
+One of the major choices in the processing of VMS and fish ticket data is figuring out how to deal with the fact that fishers often report or submit multiple fish tickets in one day. We can look at how many vessels this applies to, and how often this is the case for primarily Dungeness trips.
+
+```{r}
+# Count what proportion of DCRB trips are multi-target
+dcrb_multi_trips_count <- vms_dcrb %>% 
+  group_by(Rec_ID) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  select(Rec_ID,DOCNUM,TARGET,TARGET_max,westcoastdate_notime) %>% 
+  mutate(is_multi_trip=ifelse(nchar(TARGET)>4,1,0)) %>% 
+  # we can count by month
+  mutate(month=month(westcoastdate_notime)) %>% 
+  group_by(month) %>% 
+  summarise(tot_tix=n_distinct(Rec_ID),n_singletarget_trips=sum(is_multi_trip==0),n_multi_trips=sum(is_multi_trip)) %>% 
+  ungroup()
+
+dcrb_multi_trips_count %>% 
+  gather(type,ntrips,tot_tix:n_multi_trips) %>% 
+  ggplot(aes(month,ntrips,color=type))+
+  geom_line(size=1.5)+
+  geom_point(size=1.5)+
+  scale_x_continuous(breaks=1:12,limits = c(1,12))+
+  scale_color_aaas(name="",labels=c("Multiple Targets","Only Crab","Total"))+
+  labs(x="Month",y="Number of Trips",title="Number of Total, Single, and Multi-target Trips\n2011 by month")+
+  theme(legend.position = c(0.8,0.8),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line())
+```
+
+
+### Distribution of Trips
+
+All Dungeness crab VMS records
+```{r}
+coastline <- ne_states(country='United States of America',returnclass = 'sf') %>% 
+  filter(name %in% c('California','Oregon','Washington'))
+
+vms_dcrb_sf <- vms_dcrb %>%
+  st_as_sf(coords=c('LONGITUDE','LATITUDE'),crs=4326)
+
+bbox <- st_bbox(vms_dcrb_sf)
+ggplot()+
+  geom_sf(data=vms_dcrb_sf,size=0.5)+
+  geom_sf(data=coastline,col=NA)+
+  lims(x=c(bbox[1],bbox[3]),y=c(bbox[2],bbox[4]))+
+  labs(title="All DCRB VMS points, 2011")+
+  theme(axis.text.x = element_text(angle=45))
+```
+
+## Representative Vessels
+
+Now we extract a vessel and look at its tracks
+
+```{r}
+# fishtix <- read_csv("C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/VMS/VMS_Outputs_wTARGET_10d_lookback_2011_final_cleaned_interpolated_regular.csv")
+
+# For now, just look at a vessel with many VMS records
+# somewhat haphazardly, I choose vessel "605198", which had 31 trips and >2000 VMS pings in 2011
+sample_vessel_vms <- vms_dcrb %>% 
+  filter(DOCNUM=="605198")
+```
+
+For this vessel, how many VMS points are associated with each trip?
+
+```{r}
+sample_vessel_vms %>% 
+  count(Rec_ID) %>% 
+  arrange(desc(n)) %>% 
+  kable(col.names = c("Fish Ticket","Number of VMS"))
+```
+
+The vessel's trips ranged between 11 and 204 interpolated VMS points.
+
+The shortest trip (by number of VMS pings) looked like this:
+```{r}
+short_trip<-sample_vessel_vms %>% 
+  filter(Rec_ID==441491906) %>% 
+  st_as_sf(coords=c("LONGITUDE","LATITUDE"),crs=4326)
+
+bbox_trip1 <- st_bbox(short_trip)
+
+# sptable for drawing paths
+short_trip_tbl <- short_trip %>% 
+  spbabel::sptable()
+
+ggplot()+
+  geom_path(data=short_trip_tbl,aes(x_,y_),color="black")+
+  geom_sf(data=coastline,col=NA,fill='gray50')+
+  lims(x=c(bbox_trip1[1],bbox_trip1[3]),y=c(bbox_trip1[2],bbox_trip1[4]))+
+  theme(axis.text.x = element_text(angle=45))+
+  labs(x="Longitude",y="Latitude",title="A Short DCRB Trip\nAug 12, 2011")
+  
+```
+
+While the longest looked like this:
+
+```{r}
+long_trip<-sample_vessel_vms %>% 
+  filter(Rec_ID==441484781) %>% 
+  st_as_sf(coords=c("LONGITUDE","LATITUDE"),crs=4326)
+
+bbox_trip2 <- st_bbox(long_trip)
+
+# sptable for drawing paths
+long_trip_tbl <- long_trip %>% 
+  spbabel::sptable()
+
+ggplot()+
+  geom_path(data=long_trip_tbl,aes(x_,y_),color="darkred")+
+  geom_sf(data=coastline,col=NA, fill='gray50')+
+  lims(x=c(bbox_trip2[1],bbox_trip2[3]),y=c(bbox_trip2[2],bbox_trip2[4]))+
+  theme(axis.text.x = element_text(angle=45))+
+  labs(x="Longitude",y="Latitude",title="A Long DCRB Trip\nJune 15-23, 2011")
+```
+
