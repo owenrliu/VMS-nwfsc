@@ -1,0 +1,120 @@
+---
+title: "Exploratory Plots"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r pkgs, include=FALSE,message=F,warning=FALSE}
+library(tidyverse)
+library(knitr)
+library(extrafont)
+library(ggsci)
+library(lubridate)
+
+# ggplot theme
+plot_theme <-   theme_minimal()+
+  theme(text=element_text(family="Gill Sans MT",size=12,color="black"),
+        legend.text = element_text(size=14),
+        axis.title=element_text(family="sans",size=14,color="black"),
+        axis.text=element_text(family="sans",size=8,color="black"),
+        panel.grid.major = element_line(color="gray50",linetype=3))
+theme_set(plot_theme)
+```
+
+# Introduction
+
+The purpose of this document is to produce a number of plots that describe the relationships between variables in the cleaned, interpolated VMS data for all years from 2009-2019.
+
+The cleaning of the data has been done elsewhere, but for the purposes of the following plots, the important points are:
+
+* Raw VMS data were cleaned and checked for errors, and then linearly interpolated and regularized. We linearly interpolated between recorded VMS points to obtain a relative measure of speed and distance traveled during each trip, then regularized those data, choosing points along the paths such that we have a VMS record for each vessel at more regular intervals.
+* A fishing "trip" (the unit of many of the analyses below) is defined as the collection of VMS records preceding a landed, recorded PacFIN fish ticket. This means that one "trip" could involve multiple returns to port by a vessel across multiple days, as long as there is no ticket submitted within that time frame.
+* In data processing, VMS records were assigned to fish tickets using two criteria. First, for each ticket, we looked backwards to see when the previous ticket had been submitted, and assigned all VMS records after the previous ticket to the current ticket. Second, for those vessels with long periods between submitted tickets, we enforced a 10 day "lookback window", such that the maximum number of calendar days of VMS records that could be associated with a single ticket is 10.
+* We are focused here on fishing trips for Dungeness crab, but some vessels can participate in multiple fisheries. In data processing, if multiple tickets were submitted by a vessel on the same day, we denoted the primary target species for that trip as the species with the most landed pounds across all tickets. However, we also marked those trips so we can investigate any differences between single and multispecies fishing trips.
+
+# General Trends
+
+In this section, we summarize the data on broad scales to look at total landings over time and representation of the fleet through VMS records.
+
+```{r import data}
+# File path where data are held
+fp <- "C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/VMS/"
+fp_tix <- "C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/Fish tickets/"
+
+# Load Rdata files
+# Interpolated, regularized VMS data, all years 
+vms<-readRDS(file=paste0(fp,"VMS_int_reg_w_grid.rds"))
+
+# fish ticket data
+load(file=paste0(fp_tix,"FishTix_all_2009_2018.RData"))
+```
+
+## Total Landings, VMS Records, and Number of Vessels over Time
+
+Organize fish ticket data
+
+```{r fishtix}
+# Summarize fish tickets by target species as defined above, and denote whether each trip is multispecies
+fishtix <- fishtix_basic_all %>% 
+  
+  # start with all fishtickets for the year
+  select(Rec_ID,pacfin_port_code,drvid,date,TARGET,DCRB..lbs.,LOBS..lbs.,SABL..lbs.,SPRW..lbs.,OtherGear..lbs., Other..lbs.) %>%
+  
+  #rename port
+  rename(Port_Of_Landing=pacfin_port_code) %>% 
+
+  # group by vessel
+  group_by(drvid) %>%
+  arrange(desc(date),pmin(DCRB..lbs.,LOBS..lbs.,SABL..lbs.,SPRW..lbs.,OtherGear..lbs., Other..lbs.)) %>%
+  
+  # For multiple-ticket days,
+  # define "TARGET" from the ticket with most landed pounds for that day, but also retain the other targets in a string
+  group_by(drvid, date) %>% 
+  mutate(all_spp=paste(TARGET,sep='',collapse=''),sumlbs=DCRB..lbs.+LOBS..lbs.+SABL..lbs.+SPRW..lbs.+OtherGear..lbs.+Other..lbs.) %>% 
+  top_n(1,wt=sumlbs) %>% 
+  select(-sumlbs) %>% 
+  ungroup() %>% 
+  
+  # denote whether a trip is multispecies (binary)
+  mutate(num_TARGET=nchar(all_spp)/4) %>% 
+  mutate(date=as_date(date,format="%m/%d/%Y",tz="America/Los_Angeles")) %>% 
+  mutate(month=month(date),year=year(date))
+```
+
+What are the total Dungeness landings represented in the fish ticket data over time, and what proportion of those landings are represented in our VMS records?
+
+```{r}
+landings_by_month <- fishtix %>%
+  group_by(year,month) %>% 
+  summarise(DCRB_lbs=sum(DCRB..lbs.)) %>%
+  mutate(DCRB_mt=DCRB_lbs/2204.62) %>% 
+  ungroup() %>% 
+  mutate(day=1) %>% 
+  unite(date,year,month,day,sep="-",remove = FALSE) %>% 
+  mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles"))
+
+landings_by_month %>% 
+  ggplot(aes(date,DCRB_lbs/1e6))+
+  geom_point()+
+  geom_line()+
+  labs(x="Date",y="DCRB Landings (Million Lbs)",title="DCRB Landings by Month, all Tickets")
+
+landings_by_year <- fishtix %>%
+  group_by(year) %>% 
+  summarise(DCRB_lbs=sum(DCRB..lbs.)) %>%
+  mutate(DCRB_mt=DCRB_lbs/2204.62) %>% 
+  ungroup()
+
+landings_by_year %>% 
+  ggplot(aes(year,DCRB_lbs/1e6))+
+  geom_point()+
+  geom_line()+
+  ylim(0,NA)+
+  labs(x="Year",y="DCRB Landings (Million Lbs)",title="DCRB Landings by Year, all Tickets")
+```
+
+
