@@ -133,10 +133,11 @@ save.image(file=paste0(fp,"VMS_2009_2018_clean.RData"))
 
 ## Load Fish Ticket Data
 
-Like the matched VMS data, there are a few versions of the processed fish ticket data
+Like the matched VMS data, there are several versions of the processed fish ticket data
 
 * `fish tickets YEAR processed_multispecies03.csv` is after basic processing before VMS matching
-* `FishTix_wVMS_10d_lookback_YEAR.csv` are the VMS-matched fish tickets
+* `processed_fishtickets_with_vlength_YEAR.csv` is after matching vessel lengths 
+* `FishTix_wVMS_10d_lookback_YEAR.csv` are the VMS-matched fish tickets, excluding vessels with no VMS records
 * `FishTix_wVMS_10d_lookback_YEAR_VMSedit.csv` exclude trips the were removed for overly large time gaps
 
 ```{r import tix}
@@ -145,7 +146,7 @@ years <- 2009:2018
 
 for(i in years){
   tempname <- paste0('fishtix_basic_',i)
-  tempout <- read_csv(paste0(fp_tix,'Basic Processing (Step 1 Only)/','fish tickets ',i,' processed_multispecies03.csv'),col_types = cols(drvid='c',gear_code_all='i'))
+  tempout <- read_csv(paste0(fp_tix,'Basic Processing (Step 1 Only)/','fish tickets ',i,' processed_multispecies03.csv'),col_types = cols(drvid='c',gear_code_all='n'))
   assign(tempname,tempout)
 }
 
@@ -153,14 +154,26 @@ for(i in years){
 fishtix_basic_all <- bind_rows(fishtix_basic_2009,fishtix_basic_2010,fishtix_basic_2011,fishtix_basic_2012,fishtix_basic_2013,fishtix_basic_2014,fishtix_basic_2015,fishtix_basic_2016,fishtix_basic_2017,fishtix_basic_2018)
 ```
 
+Fish tickets with vessel lengths
+```{r}
+for(i in years){
+  tempname <- paste0('fishtix_vlength_',i)
+  tempout <- read_csv(paste0(fp_tix,'Basic Processing (Step 1 Only)/','processed_fishtickets_with_vlength_',i,'.csv'),col_types = cols(drvid='c',gear_code_all='n'))
+  assign(tempname,tempout)
+}
+
+# throws a couple of readr errors here, but they are only in one column (gear code, ) which we do not offically need anyway
+fishtix_vlength_all <- bind_rows(fishtix_vlength_2009,fishtix_vlength_2010,fishtix_vlength_2011,fishtix_vlength_2012,fishtix_vlength_2013,fishtix_vlength_2014,fishtix_vlength_2015,fishtix_vlength_2016,fishtix_vlength_2017,fishtix_vlength_2018)
+```
+
 Now the VMS-matched tickets
 ```{r}
-keeps <- c('vms_orig_clean','vms_int_reg','vms_int_all','fp','fp_tix','years','fishtix_basic_all')
+keeps <- c('vms_orig_clean','vms_int_reg','vms_int_all','fp','fp_tix','years','fishtix_basic_all','fishtix_vlength_all')
 rm(list=setdiff(ls(),keeps))
 
 for(i in years){
   tempname <- paste0('fishtix_vms_matched_',i)
-  tempout <- read_csv(paste0(fp_tix,'VMS-Matched (Step 5)/','FishTix_wVMS_10d_lookback_',i,'.csv'),col_types = cols(gear_code_all='i'))
+  tempout <- read_csv(paste0(fp_tix,'VMS-Matched (Step 5)/','FishTix_wVMS_10d_lookback_',i,'.csv'),col_types = cols(gear_code_all='n'))
   assign(tempname,tempout)
 }
 
@@ -173,7 +186,7 @@ fishtix_matched_all <- bind_rows(fishtix_vms_matched_2009,fishtix_vms_matched_20
 Save all fish ticket data as an RData structure.
 
 ```{r}
-rm(list=ls()[!(ls() %in% c('fishtix_basic_all','fishtix_matched_all','fp_tix'))])
+rm(list=ls()[!(ls() %in% c('fishtix_basic_all','fishtix_vlength_all','fishtix_matched_all','fp_tix'))])
 
 save.image(file=paste0(fp_tix,"FishTix_all_2009_2018.RData"))
 ```

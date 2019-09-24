@@ -12,7 +12,7 @@ This is version 2 of the code. In this version, the statement to search for the 
 
 <br>
 ```{r "setup", include=FALSE}
-knitr::opts_knit$set(root.dir = "C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/") 
+knitr::opts_knit$set(root.dir = "C:/Users/Owen.Liu/Documents/NWFSC Research/Dungeness Fleet Dynamics/VMS DATA CONFIDENTIAL/")
 ```
 <br>
 <br>
@@ -39,6 +39,8 @@ library(dplyr)
 library(tidyr)
 library(lubridate) #https://rstudio-pubs-static.s3.amazonaws.com/28038_1bcb9aa80ca84f27ace07d612872861a.html
 library(magrittr)
+library(here)
+set_here("C:/Users/Owen.Liu/Documents/NWFSC Research/Dungeness Fleet Dynamics/VMS DATA CONFIDENTIAL/")
 ```
 <br>
 
@@ -110,7 +112,6 @@ Read in VMS files
 # tmp_dbf_current <- read.dbf(paste0(VMS_dir,"bath_region_all_data_", current_year,"_edited.dbf"), as.is=TRUE)
 
 ## .CSV FILES
-## OWEN NOTE: FOR 2009, WE DON'T HAVE A PREVIOUS YEAR?
 # tmp_dbf_previous <- read_csv(paste0(VMS_dir,"bath_region_all_data_", current_year-1,"_edited.csv"))
 tmp_dbf_current <- read_csv(paste0(VMS_dir,"bath_region_all_data_", current_year,"_edited.csv"))
 
@@ -234,7 +235,7 @@ A summary of the code chunk:
   (b) If the "begin" date is NOT equal to the "end" date, assign all VMS records within that period to ticket YY. Save the VMS data to the output data frame. Remove any duplicates in the data frame. Move on to the next fish ticket.
 
 <br>
-```{r}
+```{r orig loop, eval=FALSE}
 ## start time to run code
 tStart <- Sys.time()
 
@@ -369,18 +370,18 @@ write.csv(fishtix_out, file=paste0(outdir,"FishTix_wVMS_",lookback_window,"d_loo
 ```
 <br>
 
-```{r, eval=FALSE}
+```{r owen match, eval=TRUE}
 ## OWEN NOTE: trying a different method of the above
 # library(progress)
 ## function for pulling vms data for specified beginning and end
-pull_vms <- function(dat,begin,end) {
-  out <- dat %>%
-    filter(westcoastdate >= begin,westcoastdate <= end) %>%
-    as_tibble()
-  out
-}
+# pull_vms <- function(dat,begin,end) {
+#   out <- dat %>%
+#     filter(westcoastdate >= begin,westcoastdate <= end) %>%
+#     as_tibble()
+#   out
+# }
 
-library(purrr)
+# library(purrr)
 
 ptm <- proc.time()
 
@@ -420,21 +421,29 @@ vms_out_owen <- fishtix_VMSyear_wLookback %>%
   
   # nest by ticket and match all vms for that vessel to each ticket (returns a list-column)
   ungroup() %>% 
-  nest_join(tmp_dbf,by=c('drvid'='DOCNUM'),keep=TRUE,name="all_vms") %>% 
-  group_by(Rec_ID) %>% 
+  # nest_join(tmp_dbf,by=c('drvid'='DOCNUM'),keep=TRUE,name="all_vms") %>% 
+  left_join(tmp_dbf,by=c('drvid'='DOCNUM')) %>% 
+  
+  # filter, in one step, the VMS data such that the data for each trip is correctly truncated to fall within the lookback window. 
+  # If any tickets did NOT match VMS data, they will not have associated dates from VMS. 
+  # We retain these, and then produce a binary indicator denoting that they did not match.
+  filter((westcoastdate >= begin & westcoastdate <= end)| is.na(westcoastdate)) %>%
+  mutate(has_vms=ifelse(is.na(westcoastdate),0,1)) %>% 
+  # group_by(Rec_ID) %>% 
   
   # then, filter the VMS from each ticket between the indicated dates
-  mutate(vms=purrr::pmap(list(all_vms,begin,end),pull_vms)) %>% 
-  select(-all_vms) %>% 
+  # mutate(vms=purrr::pmap(list(all_vms,begin,end),pull_vms)) %>% 
+  # select(-all_vms) %>% 
   
   # Finally, unnest the list-column and select the variables of interest
-  unnest() %>% 
+  # IMPORTANT: the option keep_empty=TRUE here RETAINS the unjoined rows. That is, it keep the fish tickets corresponding to vessels with no VMS.
+  # unnest(cols=c(vms),keep_empty = TRUE) %>% 
   ungroup() %>% 
-  select(UTCDATETIM,LATITUDE, LONGITUDE,NGDC_M,VESSEL_NAM,AVG_SPEED,AVG_COURSE,DOCNUM,DECLARATIO,X_COORD,Y_COORD,VMS_RECNO,westcoastdate,westcoastdate_notime,TARGET,all_spp,Port_Of_Landing,Rec_ID,date,begin,end)
+  select(UTCDATETIM,LATITUDE, LONGITUDE,NGDC_M,VESSEL_NAM,AVG_SPEED,AVG_COURSE,drvid,DECLARATIO,X_COORD,Y_COORD,VMS_RECNO,westcoastdate,westcoastdate_notime,TARGET,all_spp,Port_Of_Landing,Rec_ID,date,begin,end,has_vms)
 
 proc.time()-ptm
 
-write_csv(vms_out_owen,"C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/owen processed/VMS_Outputs_wTARGET_10d_lookback_2009_owen.csv")
+write_csv(vms_out_owen,here::here("Processed Data", "owen processed","clean","VMS_Outputs_wTARGET_10d_lookback_2009_wMissingVMS.csv"))
 ### TEST PIECES, DELETE LATER ###
 # count of how many tix per vessel/target combo
 # tix_per_vessel_target <- vms_out_owen %>% count(drvid,TARGET)

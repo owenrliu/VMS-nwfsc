@@ -1,6 +1,9 @@
 ---
 title: "Exploratory Plots"
-output: html_document
+output:
+  html_document:
+    toc: true
+    toc_float: true
 ---
 
 ```{r setup, include=FALSE}
@@ -15,6 +18,7 @@ library(extrafont)
 library(ggsci)
 library(lubridate)
 library(sf)
+library(magrittr)
 
 # ggplot theme
 plot_theme <-   theme_minimal()+
@@ -59,15 +63,18 @@ load(file=paste0(fp_tix,"FishTix_all_2009_2018.RData"))
 
 ## Total Landings, Trips, and Number of Vessels over Time
 
-First we organized the fish ticket data, so we can calculate quantities of interest like total landings per month, number of unique vessels, and whether or not a fish ticket is associated with VMS data.
+First we organize the fish ticket data, so we can calculate quantities of interest like total landings per month, number of unique vessels, and whether or not a fish ticket is associated with VMS data. We use the version of cleaned fish ticket data here that:
+
+* contain all tickets, not just those that have associated VMS data
+* contain vessel lengths
 
 
 ```{r fishtix}
 # Summarize fish tickets by target species as defined above, and denote whether each trip is multispecies
-fishtix <- fishtix_basic_all %>% 
+fishtix <- fishtix_vlength_all %>% 
   
   # start with all fishtickets for the year
-  select(Rec_ID,pacfin_port_code,drvid,date,TARGET,DCRB..lbs.,LOBS..lbs.,SABL..lbs.,SPRW..lbs.,OtherGear..lbs., Other..lbs.) %>%
+  select(Rec_ID,pacfin_port_code,drvid,date,TARGET,DCRB..lbs.,LOBS..lbs.,SABL..lbs.,SPRW..lbs.,OtherGear..lbs., Other..lbs.,FINAL_LENGTH) %>%
   
   #rename port
   rename(Port_Of_Landing=pacfin_port_code) %>% 
@@ -95,9 +102,9 @@ fishtix <- fishtix_basic_all %>%
 vms_fishtix_join <- vms %>% 
   select(Rec_ID) %>% 
   distinct() %>% 
-  mutate(is_vms=1) %>% 
+  mutate(has_vms=1) %>% 
   right_join(fishtix,by="Rec_ID") %>% 
-  mutate(is_vms=replace_na(is_vms,0))
+  mutate(has_vms=replace_na(has_vms,0))
 ```
 
 ### Total Dungeness Vessels
@@ -107,7 +114,7 @@ vms_fishtix_join <- vms %>%
 
 ```{r count vessels}
 nvessels_by_month <- vms_fishtix_join %>% 
-  group_by(year,month,is_vms) %>% 
+  group_by(year,month,has_vms) %>% 
   summarise(nvessels=n_distinct(drvid)) %>% 
   ungroup() %>% 
   mutate(day=1) %>% 
@@ -115,7 +122,7 @@ nvessels_by_month <- vms_fishtix_join %>%
   mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles"))
 
 nvessels_by_month %>% 
-  ggplot(aes(date,nvessels,fill=factor(is_vms),col=factor(is_vms)))+
+  ggplot(aes(date,nvessels,fill=factor(has_vms),col=factor(has_vms)))+
   geom_bar(stat='identity')+
   scale_fill_locuszoom(name="",labels=c("No VMS","VMS"))+
   scale_color_locuszoom(name="",labels=c("No VMS","VMS"))+
@@ -133,7 +140,7 @@ nvessels_by_month %>%
 
 ```{r}
 landings_by_month <- vms_fishtix_join %>%
-  group_by(year,month,is_vms) %>% 
+  group_by(year,month,has_vms) %>% 
   summarise(DCRB_lbs=sum(DCRB..lbs.)) %>%
   mutate(DCRB_mt=DCRB_lbs/2204.62) %>% 
   ungroup() %>% 
@@ -142,7 +149,7 @@ landings_by_month <- vms_fishtix_join %>%
   mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles"))
 
 landings_by_month %>% 
-  ggplot(aes(date,DCRB_lbs/1e6,fill=factor(is_vms),col=factor(is_vms)))+
+  ggplot(aes(date,DCRB_lbs/1e6,fill=factor(has_vms),col=factor(has_vms)))+
   geom_bar(stat='identity')+
   scale_fill_locuszoom(labels=c("No VMS","VMS"),name="")+
   scale_color_locuszoom(labels=c("No VMS","VMS"),name="")+
@@ -153,13 +160,13 @@ landings_by_month %>%
         panel.grid.minor = element_blank())
 
 landings_by_year <- vms_fishtix_join %>%
-  group_by(year,is_vms) %>% 
+  group_by(year,has_vms) %>% 
   summarise(DCRB_lbs=sum(DCRB..lbs.)) %>%
   mutate(DCRB_mt=DCRB_lbs/2204.62) %>% 
   ungroup()
 
 landings_by_year %>% 
-  ggplot(aes(year,DCRB_lbs/1e6,fill=factor(is_vms),col=factor(is_vms)))+
+  ggplot(aes(year,DCRB_lbs/1e6,fill=factor(has_vms),col=factor(has_vms)))+
   geom_bar(stat='identity')+
   scale_fill_locuszoom(labels=c("No VMS","VMS"),name="")+
   scale_color_locuszoom(labels=c("No VMS","VMS"),name="")+
@@ -174,7 +181,7 @@ How many total trips targeting Dungeness were there over time? Here, trips are d
 
 ```{r calc trips}
 trips_by_month <- vms_fishtix_join %>% 
-  group_by(year,month,is_vms) %>% 
+  group_by(year,month,has_vms) %>% 
   filter(TARGET=="DCRB") %>% 
   summarise(n_trips=n_distinct(Rec_ID)) %>% 
   ungroup() %>% 
@@ -183,13 +190,13 @@ trips_by_month <- vms_fishtix_join %>%
   mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles"))
 
 trips_by_year <- vms_fishtix_join %>% 
-  group_by(year,is_vms) %>% 
+  group_by(year,has_vms) %>% 
   filter(TARGET=="DCRB") %>% 
   summarise(n_trips=n_distinct(Rec_ID)) %>% 
   ungroup()
 
 trips_by_month %>% 
-  ggplot(aes(date,n_trips,fill=factor(is_vms),col=factor(is_vms)))+
+  ggplot(aes(date,n_trips,fill=factor(has_vms),col=factor(has_vms)))+
   geom_bar(stat='identity')+
   scale_fill_locuszoom(labels=c("No VMS","VMS"),name="")+
   scale_color_locuszoom(labels=c("No VMS","VMS"),name="")+
@@ -200,7 +207,7 @@ trips_by_month %>%
         panel.grid.minor = element_blank())
 
 trips_by_year %>% 
-  ggplot(aes(year,n_trips,fill=factor(is_vms),col=factor(is_vms)))+
+  ggplot(aes(year,n_trips,fill=factor(has_vms),col=factor(has_vms)))+
   geom_bar(stat='identity')+
   scale_fill_locuszoom(labels=c("No VMS","VMS"),name="")+
   scale_color_locuszoom(labels=c("No VMS","VMS"),name="")+
@@ -214,11 +221,11 @@ Do more trips imply greater landings? How tight (linear) is this relationship? D
 
 ```{r join trips landings,message=F,warning=FALSE}
 trips_land_by_month <- landings_by_month %>% 
-  left_join(trips_by_month,by=c('year','month','day','date','is_vms'))
+  left_join(trips_by_month,by=c('year','month','day','date','has_vms'))
 
 # Scatter plot
 trips_land_by_month %>% 
-  ggplot(aes(n_trips,DCRB_lbs/1e6,col=factor(is_vms),fill=factor(is_vms)))+
+  ggplot(aes(n_trips,DCRB_lbs/1e6,col=factor(has_vms),fill=factor(has_vms)))+
   geom_point()+
   # geom_smooth(method='lm',se=F)+
   geom_smooth()+
@@ -231,7 +238,7 @@ A couple of things to notice here. First, the relationship between trips and lan
 
 Second, there is some scatter around the basic relationship between trips and landings, suggesting there are some anomalously good (above the line) and poor (below the line) months.
 
-Finally, there is a stark difference between VMS and non-VMS vessels in this relationship. Vessels with VMS (for whatever reason), show relatively much higher monthly landings in fewer trips than non-VMS vessels. For example, in a month with ~1500 trips, VMS vessels could be expected to land approximately six million lbs of Dungeness, while non-VMS vessels would require twice that many trips to achieve the same landings. The exact reason for this discrepancy is unknown, but is likely a product of the relatively larger size and capcacity of VMS-equipped vessels. We can explore this further later on.
+Finally, there is a stark difference between VMS and non-VMS vessels in this relationship. Vessels with VMS (for whatever reason), obtain relatively greater monthly landings in fewer trips than non-VMS vessels. For example, in a month with ~1500 trips, VMS vessels could be expected to land approximately six million lbs of Dungeness, while non-VMS vessels would require twice that many trips to achieve the same landings. The exact reason for this discrepancy is unknown, but is likely a product of the relatively larger size and capcacity of VMS-equipped vessels. We can explore this further later on.
 
 Next we turn to the calculation of catch-per-unit-effort, or CPUE, which describes the efficiency of fishing, and should shed further light on some of the relationships suggested in this plot.
 
@@ -248,7 +255,7 @@ We can calculate number of trips and monthly landings On the individual vessel l
 ```{r calc trips by vessel}
 trips_by_vessel_month <- vms_fishtix_join %>% 
   filter(TARGET=="DCRB") %>% 
-  group_by(year,month,drvid,is_vms) %>% 
+  group_by(year,month,drvid,has_vms) %>% 
   summarise(n_trips=n_distinct(Rec_ID),tot_lbs=sum(DCRB..lbs.)) %>% 
   ungroup() %>% 
   mutate(day=1) %>% 
@@ -256,7 +263,7 @@ trips_by_vessel_month <- vms_fishtix_join %>%
   mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles"))
 
 trips_by_vessel_month %>% 
-  ggplot(aes(n_trips,tot_lbs/1e3,col=factor(is_vms),fill=factor(is_vms)))+
+  ggplot(aes(n_trips,tot_lbs/1e3,col=factor(has_vms),fill=factor(has_vms)))+
   geom_point()+
   # geom_smooth(method='lm',se=F)+
   geom_smooth()+
@@ -269,24 +276,24 @@ Here, it seems that there is immense individual variation in landings between ve
 
 *  As in the previous section, we could be seeing an artifact of the fishery being very productive early in each season, with a relatively small number of trips leading to large amounts of landings.
 
-*  In addtion to the seasonality, this observation could be partly due to the way we have defined trips (as all of the activity preceding a submitted landings receipt/fish ticket). Vessels can presumably transit in and out of port multiple times, storing catch before officially filling out a landings receipt. If this is the case, early in the season when the fishing is very good, fishers may be rushing to capture crab and only submitting tickets when they have filled available storage space. Later in the season, when many fishers are presumably more diversified, they may submit multiple smaller tickets at shorter time intervals. This would have the effect of increasing the number of trips rewquired to obtain a certain level of landings, which would help explain the phenomenon above.
+*  In addition to the seasonality, this observation could be partly due to the way we have defined trips (as all of the activity preceding a submitted landings receipt/fish ticket). Vessels can presumably transit in and out of port multiple times, storing catch before officially filling out a landings receipt. If this is the case, early in the season when the fishing is very good, fishers may be rushing to capture crab and only submitting tickets when they have filled available storage space. Later in the season, when many fishers are presumably more diversified, they may submit multiple smaller tickets at shorter time intervals. This would have the effect of increasing the number of trips rewquired to obtain a certain level of landings, which would help explain the phenomenon above.
 
 We can investigate these two possibilities further by looking at CPUE over time and by substituting different measures of effort to replace trips and see if the relationships look similar.
 
-### Landing per Trip over Time
+### Landings per Trip over Time
 
-```{r cpue over time}
-cpue_by_month <- trips_by_vessel_month %>% 
+```{r cpue trips}
+cpue_by_ticket <- trips_by_vessel_month %>% 
   mutate(cpue_month=tot_lbs/n_trips) %>% 
-  group_by(year,month,is_vms) %>% 
+  group_by(year,month,has_vms) %>% 
   summarise(mean_cpue=mean(cpue_month,na.rm=T),sd_cpue=sd(cpue_month,na.rm=T),
             upper=mean_cpue+sd_cpue,lower=pmax(0,mean_cpue-sd_cpue)) %>% mutate(day=1) %>% 
   unite(date,year,month,day,sep="-",remove = FALSE) %>% 
   mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles"))
 
 dodge <- position_dodge(width=40)
-cpue_by_month %>% 
-  ggplot(aes(date,mean_cpue,ymax=upper,ymin=lower,col=factor(is_vms),group=factor(is_vms)))+
+cpue_by_ticket %>% 
+  ggplot(aes(date,mean_cpue,ymax=upper,ymin=lower,col=factor(has_vms),group=factor(has_vms)))+
   geom_pointrange(position = dodge,size=0.3)+
   scale_color_locuszoom(name="",labels=c("No VMS","VMS"))+
   labs(x="Date",y="Landings Per Trip (+/- 1 SD)",title="Landings Per Trip Over Time")+
@@ -295,4 +302,170 @@ cpue_by_month %>%
 ```
 
 This is a messy plot, but the point is clear: At the individual vessel level, landings per trip peak early in the season and decline rapidly thereafter. One other thing I notice here is that again, VMS-equipped vessels (yellow) seem to have significantly higher landings per trip relative to their non-VMS counterparts (red).
+
+### Landings per Day
+
+Another way we can calculate effort is to look at not just the number of trips, but the length of each of those trips. Our expectation would be that longer trips (greater number of days) result in greater landings, but that this relationship may attenuate as the crab season progresses.
+
+```{r calc trip days}
+# calculate the number of days associated with each fish ticket
+fishtix_trip_time <- vms_fishtix_join %>% 
+  group_by(drvid) %>% 
+  arrange(desc(date)) %>% 
+  mutate(end = ymd_hms(paste(date, "23:59:59"),tz= "America/Los_Angeles")) %>%
+  # find the ticket BEFORE each ticket and note its time.
+  mutate(prev_ticket_dttm=lead(end,1)) %>% 
+  mutate(ticket_days=time_length(end-prev_ticket_dttm,"days")) %>% 
+  # if multiple tickets on one day,set ticket_days to 1
+  mutate(ticket_days=recode(ticket_days,`0`=1)) %>% 
+  # now, select just the DCRB trips
+  filter(TARGET=="DCRB") %>% 
+  arrange(drvid,desc(date)) %>% 
+  ungroup()
+
+# What is the distribution of trip lengths for all vessels?
+quantile(fishtix_trip_time$ticket_days,probs = seq(0,1,by=0.1),na.rm=T)
+quantile(fishtix_trip_time$ticket_days,0.95,na.rm=T)
+
+```
+
+Five percent of trips have greater than 26 days since the previous ticket. These observations are very likely not representative of actual trip length, so we exclude these (although we could revisit this filtering later). Now we calculate the new CPUE measure: landed pounds per trip-day.
+
+```{r calc cpue by days}
+cpue_trip_time <- fishtix_trip_time %>% 
+  filter(ticket_days<=26) %>% 
+  mutate(cpue_per_day=DCRB..lbs./ticket_days)
+
+# Plot
+cpue_trip_time %>% 
+  ggplot(aes(date,cpue_per_day/1e3,col=factor(has_vms)))+
+  geom_point()+
+  geom_smooth(se=F)+
+  scale_color_locuszoom(name="",labels=c("No VMS","VMS"))+
+  labs(x="Date",y="Landings Per Day (x1000 Lbs)",title="Landings Per Trip-Day Over Time")+
+  theme(panel.grid.minor = element_blank(),
+        legend.position = c(0.9,0.9))
+```
+
+At least at a first glance, the temporal pattern in this catch per day data looks similar to the monthly average catch per trip. However, it doesn't seem to have as stark a difference between VMS and non-VMS vessels. What about if we look more directly at trip days versus landings?
+
+```{r days vs landings}
+cpue_trip_time %>% 
+  ggplot(aes(ticket_days,DCRB..lbs./1e3,col=factor(has_vms),fill=factor(has_vms)))+
+  geom_point()+
+  geom_smooth()+
+  scale_color_locuszoom(name="",labels=c("No VMS","VMS"))+
+  scale_fill_locuszoom(name="",labels=c("No VMS","VMS"))+
+  labs(x="Days per Trip",y="Landings Per Trip (x1000 Lbs)",title="DCRB Trip-Days vs. Landings")+
+  theme(panel.grid.minor = element_blank(),
+        legend.position = c(0.9,0.9))
+```
+
+We again see evidence of medium-length trips being the most productive, perhaps near the beginning of the season. What if we separate out these data by month?
+
+```{r}
+cpue_trip_time %>% 
+  ggplot(aes(ticket_days,DCRB..lbs./1e3,col=factor(has_vms),fill=factor(has_vms)))+
+  geom_jitter(size=0.5)+
+  geom_smooth()+
+  scale_color_locuszoom(name="",labels=c("No VMS","VMS"))+
+  scale_fill_locuszoom(name="",labels=c("No VMS","VMS"))+
+  labs(x="Days per Trip",y="Landings Per Trip (x1000 Lbs)",title="DCRB Trip-Days vs. Landings (by Month)")+
+  facet_wrap(~month)+
+  theme(panel.grid.minor = element_blank())
+```
+
+Even in early-season months (November through February), we still get a similar patterns.
+
+We can also compare the two measures of CPUE we have constructed so far.
+
+```{r cpue compare}
+# Because catch per trip is a monthly aggregation measure, we have to do the same for catch per day
+cpue_trip_time_by_month <- cpue_trip_time %>% 
+  group_by(year,month,has_vms) %>% 
+  summarise(mean_cpue_tripdays=mean(cpue_per_day,na.rm=T),sd_cpue_tripdays=sd(cpue_per_day,na.rm=T),
+            upper_cpue_tripdays=mean_cpue_tripdays+sd_cpue_tripdays,
+            lower_cpue_tripdays=pmax(0,mean_cpue_tripdays-sd_cpue_tripdays)) %>% 
+  mutate(day=1) %>% 
+  unite(date,year,month,day,sep="-",remove = FALSE) %>% 
+  mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles")) %>% 
+  ungroup()
+cpue_trips_days_combine <- cpue_by_ticket %>% left_join(cpue_trip_time_by_month)
+
+cpue_trips_days_combine %>% 
+  ggplot(aes(mean_cpue_tripdays/1e3,mean_cpue/1e3))+
+  geom_point()+
+  geom_smooth()+
+  labs(x="CPUE (1000s Lbs/Day)",y="CPUE (1000s Lbs/Trip)",title="Comparison of CPUE calculations")
+```
+
+The two CPUE measures are correlated by not extremely precisely related. Hence, care should be taken when a CPUE measure like this is used.
+
+Ideally, a better measure of fishing efficiency would be using data on actual catch per individual crab pot per soak time. This may become available through logbook data, but is currently unavailable.
+
+## Comparison of Vessel Size
+
+We can use this same data to compare how things like CPUE, trip length, and total landings vary as a function of vessel size. For now, we split vessels into "Large" (>40 ft long) and Small vessels.
+
+```{r define vessel size}
+fishtix %>% 
+  select(drvid,FINAL_LENGTH) %>% 
+  distinct() %>% 
+  ggplot(aes(FINAL_LENGTH))+
+  geom_histogram(fill="blue",alpha=0.5,bins=25)+
+  labs(x="Vessel Length",y="Number of Vessels",title="Distribution of Vessel Lengths")+
+  geom_vline(xintercept = 40,linetype=2,color='black')
+
+# Define large vs. small vessels
+vms_fishtix_join %<>% filter(!is.na(FINAL_LENGTH)) %>% mutate(is_large=FINAL_LENGTH>=40)
+```
+
+### Number of Vessels
+
+```{r}
+nvessels_by_size_month <- vms_fishtix_join %>% 
+  mutate(has_vms=has_vms==1) %>% 
+  group_by(year,month,is_large,has_vms) %>% 
+  summarise(nvessels=n_distinct(drvid)) %>% 
+  ungroup() %>% 
+  mutate(day=1) %>% 
+  unite(date,year,month,day,sep="-",remove = FALSE) %>% 
+  mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles"))
+
+nvessels_by_size_month %>% 
+  ggplot(aes(date,nvessels,fill=is_large,col=is_large))+
+  geom_bar(stat='identity')+
+  facet_grid(rows = "has_vms",labeller = labeller(has_vms=c("FALSE"="No VMS","TRUE"="VMS")))+
+  scale_fill_locuszoom(name="",labels=c("Small Vessels","Large Vessels"))+
+  scale_color_locuszoom(name="",labels=c("Small Vessels","Large Vessels"))+
+  scale_x_date(date_breaks= "6 months",date_labels="%b-%Y",expand=c(0,0))+
+  labs(x="Date",y="Vessels Recording Landings",title="Number of Large and Small\nVessels by Month")+
+  theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
+        panel.grid.minor = element_blank())
+
+# Proportion of Vessels that are large vs. small and VMS vs. non-VMS
+nvessels_by_size_month %>% 
+  group_by(has_vms) %>% 
+  pivot_wider(names_from="is_large",values_from = "nvessels") %>% 
+  rename(Large="TRUE",Small="FALSE") %>% 
+  mutate(propLarge=Large/(Small+Large)) %>%
+  ungroup() %>% 
+  ggplot(aes(date,propLarge,col=has_vms))+
+  geom_point()+geom_line()+
+  scale_x_date(date_breaks= "6 months",date_labels="%b-%Y",expand=c(0,0))+
+  scale_color_locuszoom(name="",labels=c("No VMS","VMS"))+
+  labs(x="Date",y="Proportion of all Vessels >40 ft",title="Proportion of Fleet that is Large")+
+  theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
+        panel.grid.minor = element_blank())
+```
+
+An interesting thing to notice here is how the proportion of the fleet comprised of large boats is smallest at the beginning of each crab season (November and December). This might mean that a lot of small boats participate in the fishery for just a couple of months before dropping out, while the large boats are more consistent participants in the fishery.
+
+### Landings
+
+What were the landings generated by large vs small vessels?
+
+```{r}
+
+```
 
