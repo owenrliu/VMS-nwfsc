@@ -1,5 +1,5 @@
 ---
-title: "Exploratory Plots"
+title: "Landings, Trips, and CPUE of Dungeness Crab Vessels, 2009-2018"
 output:
   html_document:
     toc: true
@@ -18,6 +18,7 @@ library(extrafont)
 library(ggsci)
 library(lubridate)
 library(sf)
+library(geosphere)
 library(magrittr)
 
 # ggplot theme
@@ -32,7 +33,7 @@ theme_set(plot_theme)
 
 # Introduction
 
-The purpose of this document is to produce a number of plots that describe the relationships between variables in the cleaned, interpolated VMS data for all years from 2009-2019.
+The purpose of this document is to produce a number of plots that describe the relationships between variables in the cleaned, interpolated VMS data for all years from 2009-2018. Speficially, we explore differences in patterns of landings and effort over time, between VMS and non-VMS-equipped vessels, and between large and small vessels.
 
 The cleaning of the data has been done elsewhere, but for the purposes of the following plots, the important points are:
 
@@ -41,7 +42,7 @@ The cleaning of the data has been done elsewhere, but for the purposes of the fo
 * In data processing, VMS records were assigned to fish tickets using two criteria. First, for each ticket, we looked backwards to see when the previous ticket had been submitted, and assigned all VMS records after the previous ticket to the current ticket. Second, for those vessels with long periods between submitted tickets, we enforced a 10 day "lookback window", such that the maximum number of calendar days of VMS records that could be associated with a single ticket is 10.
 * We are focused here on fishing trips for Dungeness crab, but some vessels can participate in multiple fisheries. In data processing, if multiple tickets were submitted by a vessel on the same day, we denoted the primary target species for that trip as the species with the most landed pounds across all tickets. However, we also marked those trips so we can investigate any differences between single and multispecies fishing trips.
 
-# General Trends
+# Total Landings, Trips, and Number of Vessels over Time
 
 In this section, we summarize the data on broad scales to look at total landings over time and representation of the fleet through VMS records.
 
@@ -61,7 +62,6 @@ st_geometry(vms) <- NULL
 load(file=paste0(fp_tix,"FishTix_all_2009_2018.RData"))
 ```
 
-## Total Landings, Trips, and Number of Vessels over Time
 
 First we organize the fish ticket data, so we can calculate quantities of interest like total landings per month, number of unique vessels, and whether or not a fish ticket is associated with VMS data. We use the version of cleaned fish ticket data here that:
 
@@ -107,7 +107,7 @@ vms_fishtix_join <- vms %>%
   mutate(has_vms=replace_na(has_vms,0))
 ```
 
-### Total Dungeness Vessels
+## Total Dungeness Vessels
 
 *  How many vessels recorded landings in each month in our data?
 *  What proportion of vessels have associated VMS data in each month?
@@ -133,7 +133,7 @@ nvessels_by_month %>%
 ```
 
 
-### Total Landings
+## Total Landings
 
 *  What are the total Dungeness landings represented in the fish ticket data over time?
 *  What proportion of those landings are represented in our VMS records?
@@ -175,7 +175,7 @@ landings_by_year %>%
 ```
 
 
-### Trips 
+## Trips 
 
 How many total trips targeting Dungeness were there over time? Here, trips are defined (as above) as individual fish tickets, where the target was "DCRB", or Dungeness crab. We distinguish whether or not these trips are associated with VMS data.
 
@@ -215,7 +215,7 @@ trips_by_year %>%
   theme(legend.position = c(0.8,0.9))
 ```
 
-### Trips vs. Landings
+## Trips vs. Landings
 
 Do more trips imply greater landings? How tight (linear) is this relationship? Does it differ between VMS and non-VMS tickets?
 
@@ -242,11 +242,96 @@ Finally, there is a stark difference between VMS and non-VMS vessels in this rel
 
 Next we turn to the calculation of catch-per-unit-effort, or CPUE, which describes the efficiency of fishing, and should shed further light on some of the relationships suggested in this plot.
 
-## Catch per unit Effort
+
+# Comparison of Vessel Size
+
+We can use this same data to compare how things like CPUE, trip length, and total landings vary as a function of vessel size. For now, we split vessels into "Large" (>40 ft long) and Small vessels.
+
+```{r define vessel size}
+fishtix %>% 
+  select(drvid,FINAL_LENGTH) %>% 
+  distinct() %>% 
+  ggplot(aes(FINAL_LENGTH))+
+  geom_histogram(fill="blue",alpha=0.5,bins=25)+
+  labs(x="Vessel Length",y="Number of Vessels",title="Distribution of Vessel Lengths")+
+  geom_vline(xintercept = 40,linetype=2,color='black')
+
+# Define large vs. small vessels
+vms_fishtix_join %<>% filter(!is.na(FINAL_LENGTH)) %>% mutate(is_large=FINAL_LENGTH>=40)
+```
+## Number of Vessels
+
+```{r}
+nvessels_by_size_month <- vms_fishtix_join %>% 
+  mutate(has_vms=has_vms==1) %>% 
+  group_by(year,month,is_large,has_vms) %>% 
+  summarise(nvessels=n_distinct(drvid)) %>% 
+  ungroup() %>% 
+  mutate(day=1) %>% 
+  unite(date,year,month,day,sep="-",remove = FALSE) %>% 
+  mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles"))
+
+nvessels_by_size_month %>% 
+  ggplot(aes(date,nvessels,fill=is_large,col=is_large))+
+  geom_bar(stat='identity')+
+  facet_grid(rows = "has_vms",labeller = labeller(has_vms=c("FALSE"="No VMS","TRUE"="VMS")))+
+  scale_fill_locuszoom(name="",labels=c("Small Vessels","Large Vessels"))+
+  scale_color_locuszoom(name="",labels=c("Small Vessels","Large Vessels"))+
+  scale_x_date(date_breaks= "6 months",date_labels="%b-%Y",expand=c(0,0))+
+  labs(x="Date",y="Vessels Recording Landings",title="Number of Large and Small\nVessels by Month")+
+  theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
+        panel.grid.minor = element_blank())
+
+# Proportion of Vessels that are large vs. small and VMS vs. non-VMS
+nvessels_by_size_month %>% 
+  group_by(has_vms) %>% 
+  pivot_wider(names_from="is_large",values_from = "nvessels") %>% 
+  rename(Large="TRUE",Small="FALSE") %>% 
+  mutate(propLarge=Large/(Small+Large)) %>%
+  ungroup() %>% 
+  ggplot(aes(date,propLarge,col=has_vms))+
+  geom_point()+geom_line()+
+  scale_x_date(date_breaks= "6 months",date_labels="%b-%Y",expand=c(0,0))+
+  scale_color_locuszoom(name="",labels=c("No VMS","VMS"))+
+  labs(x="Date",y="Proportion of all Vessels >40 ft",title="Proportion of Fleet that is Large")+
+  theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
+        panel.grid.minor = element_blank())
+```
+
+An interesting thing to notice here is how the proportion of the fleet comprised of large boats is smallest at the beginning of each crab season (November and December). This may indicate that a lot of small boats participate in the fishery for just a couple of months before dropping out, while the large boats are more consistent participants in the fishery throughout the season.
+
+## Landings
+
+What were the landings generated by large vs small vessels?
+
+```{r}
+landings_by_size_month <- vms_fishtix_join %>% 
+  mutate(has_vms=has_vms==1) %>% 
+  group_by(year,month,is_large,has_vms) %>% 
+  summarise(landings=sum(DCRB..lbs.,na.rm = T)) %>% 
+  ungroup() %>% 
+  mutate(day=1) %>% 
+  unite(date,year,month,day,sep="-",remove = FALSE) %>% 
+  mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles"))
+
+landings_by_size_month %>% 
+  ggplot(aes(date,landings,fill=is_large,col=is_large))+
+  geom_bar(stat='identity')+
+  facet_grid(rows = "has_vms",labeller = labeller(has_vms=c("FALSE"="No VMS","TRUE"="VMS")))+
+  scale_fill_locuszoom(name="",labels=c("Small Vessels","Large Vessels"))+
+  scale_color_locuszoom(name="",labels=c("Small Vessels","Large Vessels"))+
+  scale_x_date(date_breaks= "6 months",date_labels="%b-%Y",expand=c(0,0))+
+  labs(x="Date",y="Vessels Recording Landings",title="Monthly Landings by Large and Small Vessels")+
+  theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
+        panel.grid.minor = element_blank())
+```
+From these data, it is clear that vessels greater than 40 feet long account for a large majority of landings in both the VMS and non-VMS equipped fleets.
+
+# Catch per unit Effort
 
 Here we explore the relationship between catch (landed pounds of crab) and effort. We will try to investigate whether there is consistency between different measures of effort (trips, VMS hours, distance traveled) in their relationships to landings.
 
-### Trips vs. Landings
+## Trips vs. Landings
 
 We got a sense of the (non-linear) relationship between trips and landings. We can look at this again through individual vessel cpue, and over time.
 
@@ -280,7 +365,7 @@ Here, it seems that there is immense individual variation in landings between ve
 
 We can investigate these two possibilities further by looking at CPUE over time and by substituting different measures of effort to replace trips and see if the relationships look similar.
 
-### Landings per Trip over Time
+## Landings per Trip over Time
 
 ```{r cpue trips}
 cpue_by_ticket <- trips_by_vessel_month %>% 
@@ -303,7 +388,7 @@ cpue_by_ticket %>%
 
 This is a messy plot, but the point is clear: At the individual vessel level, landings per trip peak early in the season and decline rapidly thereafter. One other thing I notice here is that again, VMS-equipped vessels (yellow) seem to have significantly higher landings per trip relative to their non-VMS counterparts (red).
 
-### Landings per Day
+## Landings per Day
 
 Another way we can calculate effort is to look at not just the number of trips, but the length of each of those trips. Our expectation would be that longer trips (greater number of days) result in greater landings, but that this relationship may attenuate as the crab season progresses.
 
@@ -399,73 +484,120 @@ cpue_trips_days_combine %>%
   labs(x="CPUE (1000s Lbs/Day)",y="CPUE (1000s Lbs/Trip)",title="Comparison of CPUE calculations")
 ```
 
-The two CPUE measures are correlated by not extremely precisely related. Hence, care should be taken when a CPUE measure like this is used.
+The two CPUE measures are correlated by not extremely precisely related. Hence, care should be taken when a CPUE measure like this is used, and appropriate justification should be provided..
 
 Ideally, a better measure of fishing efficiency would be using data on actual catch per individual crab pot per soak time. This may become available through logbook data, but is currently unavailable.
 
-## Comparison of Vessel Size
 
-We can use this same data to compare how things like CPUE, trip length, and total landings vary as a function of vessel size. For now, we split vessels into "Large" (>40 ft long) and Small vessels.
+## Distance traveled
 
-```{r define vessel size}
-fishtix %>% 
-  select(drvid,FINAL_LENGTH) %>% 
-  distinct() %>% 
-  ggplot(aes(FINAL_LENGTH))+
-  geom_histogram(fill="blue",alpha=0.5,bins=25)+
-  labs(x="Vessel Length",y="Number of Vessels",title="Distribution of Vessel Lengths")+
-  geom_vline(xintercept = 40,linetype=2,color='black')
+As a final measure of CPUE with our current data, we can actually calculate distance traveled during each trip and compare that to the total landings from each trip. This measurement of CPUE only works for VMS-equipped vessels. Note: these will be straight-line distances between linearly-interpolated VMS points. Therefore, they are not precisely the distances traveled by these vessels, but should be a good proxy for total distance.
 
-# Define large vs. small vessels
-vms_fishtix_join %<>% filter(!is.na(FINAL_LENGTH)) %>% mutate(is_large=FINAL_LENGTH>=40)
+First we calculate distances from the coordinates of interpolated VMS points.
+
+```{r calc dist}
+# get coordinates in Lat/Long
+vms_coords <- vms_sf %>% 
+  st_transform(4326) %>% 
+  st_coordinates()
+vms_coords %<>% as_tibble() %>% set_names(c('lon','lat'))
+
+# Join trip identifiers from fish ticket data and then calculate distances along the path of each trip
+vms_dists <- vms %>% 
+  select(Rec_ID,DOCNUM,westcoastdate) %>% 
+  bind_cols(vms_coords) %>% 
+  group_by(Rec_ID) %>% 
+  mutate(last_x=lag(lon,1),last_y=lag(lat,1)) %>% 
+  ungroup() %>% 
+  mutate(distance=distHaversine(cbind(lon,lat),cbind(last_x,last_y)))
+
+# summarize each trip, adding up total distance traveled
+trips_dists <- vms_dists %>% 
+  group_by(Rec_ID) %>% 
+  summarise(totdist=sum(distance,na.rm=T)) %>% 
+  ungroup()
 ```
 
-### Number of Vessels
+Then, we calculate CPUE again, but this time it is defined as total catch per km traveled. Remember, in this case, our analysis is restricted to those vessels for which we have VMS data.
+
+```{r calc cpue distance}
+cpue_trip_dist <- vms_fishtix_join %>% 
+  filter(has_vms==1) %>% 
+  left_join(trips_dists) %>% 
+  mutate(cpue_dist=DCRB..lbs./totdist)
+glimpse(cpue_trip_dist)
+
+# Distance traveled versus total catch per trip (trips targeted Dungeness)
+cpue_trip_dist %>% 
+  filter(TARGET=="DCRB") %>% 
+  ggplot(aes(totdist/1000,DCRB..lbs./1000,col=is_large,fill=is_large))+
+  geom_point(size=0.5)+
+  geom_smooth()+
+  scale_color_locuszoom(name="Vessel Size",labels=c("Small","Large"))+
+  scale_fill_locuszoom(name="Vessel Size",labels=c("Small","Large"))+
+  labs(x="Distance Traveled (km)",y="Crab Landings (x1000 lbs)")
+
+# Distribution of CPUE per km traveled
+cpue_trip_dist %>% 
+  filter(TARGET=="DCRB") %>% 
+  ggplot(aes(cpue_dist*1000,..density..,fill=is_large))+
+  geom_density(alpha=0.5)+
+  scale_fill_locuszoom(name="Vessel Size",labels=c("Small","Large"))+
+  xlim(0,100)+
+  labs(x="Landings per Km Traveled",y="Kernel Density")
+```
+This relationship is very noisy. There are many trips with a catch-per-km that is less than 10. At the same time, there is a long right tail, where some trips have extremely high landings relative to their distance traveled. However, from the first plot, it looks as though large vessels may scale more steeply with distance traveled than small vessels, which might be expected if large vessels are more efficient.
+
+As before, some of this noise may be due to temporal effects---fishing may be more efficient (therefore required less distance traveled per landed pound) earlier in the season. Here we average CPUE per month and look at the measure over the course of seasons.
 
 ```{r}
-nvessels_by_size_month <- vms_fishtix_join %>% 
-  mutate(has_vms=has_vms==1) %>% 
-  group_by(year,month,is_large,has_vms) %>% 
-  summarise(nvessels=n_distinct(drvid)) %>% 
-  ungroup() %>% 
-  mutate(day=1) %>% 
-  unite(date,year,month,day,sep="-",remove = FALSE) %>% 
-  mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles"))
+# cpue_by_dist_month <- cpue_trip_dist %>% 
+#   filter(TARGET=="DCRB") %>% 
+#   ungroup() %>% 
+#   group_by(year,month,is_large) %>% 
+#   summarise(mean_cpue_tripdist=mean(cpue_dist,na.rm=T),sd_cpue_tripdist=sd(cpue_dist,na.rm=T),
+#             upper_cpue_tripdist=mean_cpue_tripdist+sd_cpue_tripdist,
+#             lower_cpue_tripdist=pmax(0,mean_cpue_tripdist-sd_cpue_tripdist)) %>% 
+#   mutate(day=1) %>% 
+#   unite(date,year,month,day,sep="-",remove = FALSE) %>% 
+#   mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles")) %>% 
+#   ungroup()
 
-nvessels_by_size_month %>% 
-  ggplot(aes(date,nvessels,fill=is_large,col=is_large))+
-  geom_bar(stat='identity')+
-  facet_grid(rows = "has_vms",labeller = labeller(has_vms=c("FALSE"="No VMS","TRUE"="VMS")))+
-  scale_fill_locuszoom(name="",labels=c("Small Vessels","Large Vessels"))+
-  scale_color_locuszoom(name="",labels=c("Small Vessels","Large Vessels"))+
+cpue_trip_dist %>% 
+  filter(TARGET=="DCRB") %>% 
+  ggplot(aes(date,cpue_dist,col=is_large))+
+  geom_point()+
+  scale_color_locuszoom(name="Vessel Size",labels=c("Small","Large"))+
   scale_x_date(date_breaks= "6 months",date_labels="%b-%Y",expand=c(0,0))+
-  labs(x="Date",y="Vessels Recording Landings",title="Number of Large and Small\nVessels by Month")+
-  theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
-        panel.grid.minor = element_blank())
+  ylim(0,0.15)+
+  labs(x="Date",y="CPUE (1000s Lbs per Km)",title="")+
+  theme(panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=90,vjust=+0.5,hjust=0))
 
-# Proportion of Vessels that are large vs. small and VMS vs. non-VMS
-nvessels_by_size_month %>% 
-  group_by(has_vms) %>% 
-  pivot_wider(names_from="is_large",values_from = "nvessels") %>% 
-  rename(Large="TRUE",Small="FALSE") %>% 
-  mutate(propLarge=Large/(Small+Large)) %>%
-  ungroup() %>% 
-  ggplot(aes(date,propLarge,col=has_vms))+
-  geom_point()+geom_line()+
-  scale_x_date(date_breaks= "6 months",date_labels="%b-%Y",expand=c(0,0))+
-  scale_color_locuszoom(name="",labels=c("No VMS","VMS"))+
-  labs(x="Date",y="Proportion of all Vessels >40 ft",title="Proportion of Fleet that is Large")+
-  theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
-        panel.grid.minor = element_blank())
+# What about just by month of the year
+# cpue_by_dist_month %>%
+#   mutate(monthchr=month(month,label=T)) %>% 
+#   ggplot(aes(monthchr,mean_cpue_tripdist,col=is_large))+
+#   geom_point()+
+#   scale_color_locuszoom(name="Vessel Size",labels=c("Small","Large"))+
+#   labs(x="Month",y="Mean CPUE (1000 Lbs per Km)",title="")+
+#   theme(panel.grid.minor = element_blank(),
+#         axis.text.x = element_text(angle=90,vjust=+0.5,hjust=0))
+
 ```
 
-An interesting thing to notice here is how the proportion of the fleet comprised of large boats is smallest at the beginning of each crab season (November and December). This might mean that a lot of small boats participate in the fishery for just a couple of months before dropping out, while the large boats are more consistent participants in the fishery.
+Let's compare landings per day to landings per km traveled. Again, we are interested in how correlated these two representations of CPUE are.
 
-### Landings
-
-What were the landings generated by large vs small vessels?
-
-```{r}
-
+```{r cpue comp}
+cpue_trip_dist %>% 
+  left_join(cpue_trip_time) %>% 
+  filter(has_vms==1) %>% 
+  ggplot(aes(cpue_per_day/1e3,cpue_dist,col=is_large,fill=is_large))+
+  geom_point(alpha=0.5)+
+  geom_smooth()+
+  ylim(0,0.15)+xlim(0,18)+
+  scale_color_locuszoom(name="Vessel Size",labels=c("Small","Large"))+
+  scale_fill_locuszoom(name="Vessel Size",labels=c("Small","Large"))+
+  labs(x="CPUE (1000s Lbs/Day)",y="CPUE (1000s Lbs/Km)")
 ```
 
