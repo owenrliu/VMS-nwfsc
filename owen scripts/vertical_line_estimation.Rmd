@@ -1,5 +1,7 @@
 ---
 title: "Vertical Line Density Estimation"
+author: "Owen R. Liu"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
 output:
   html_document:
     toc: true
@@ -485,12 +487,13 @@ traps_per_trip_plot <- mean_traps_per_trip %>%
   geom_line()+
   scale_y_continuous(breaks=seq(0,500,by=100),labels=seq(0,500,by=100),limits=c(0,500))+
   labs(x="Date",y="Mean Number of Traps per Dungeness Trip")
+traps_per_trip_plot
 ```
 
 Total traps and vessels by month, calculated as mean traps per vessel-trip per month, summed over all the vessels recording trips in that month. Remember here that these numbers are only for VMS-equipped vessels.
 
 ```{r}
-total_traps_by_month_state <- traps_per_trip %>% 
+total_traps_by_month_state <- mean_traps_per_trip %>% 
   group_by(year,month,agency_code) %>% 
   summarise(tot_traps=sum(traps_per_trip),nvessels=n_distinct(drvid)) %>% 
   ungroup() %>% 
@@ -519,6 +522,9 @@ sim_traps_by_month_plot<- total_traps_by_month_state %>%
   theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
         panel.grid.minor = element_blank())
 
+vessels_by_month_plot
+sim_traps_by_month_plot
+
 #save
 fp_plots <- "C:/Users/Owen.Liu/Documents/NWFSC Research/Dungeness Fleet Dynamics/VMS DATA CONFIDENTIAL/Processed Data/owen processed/plots/"
 ggsave(filename = paste0(fp_plots,"vessels_by_month.png"),vessels_by_month_plot,w=8,h=6)
@@ -529,7 +535,7 @@ ggsave(filename = paste0(fp_plots,"traps_by_month.png"),sim_traps_by_month_plot,
 What about broken down by port group within states?
 
 ```{r cali traps}
-total_traps_by_month_port <- traps_per_trip %>% 
+total_traps_by_month_port <- mean_traps_per_trip %>% 
   group_by(year,month,agency_code,port_group_code) %>% 
   summarise(tot_traps=sum(traps_per_trip),nvessels=n_distinct(drvid)) %>% 
   mutate(day=15) %>% 
@@ -560,6 +566,9 @@ traps_by_month_port_plot <- total_traps_by_month_port %>%
   scale_x_date(date_breaks= "1 year",date_labels="%b-%Y",expand=c(0,0))+
   theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
         panel.grid.minor = element_blank())
+
+vessels_by_month_port_plot
+traps_by_month_port_plot
 
 ggsave(filename = paste0(fp_plots,"vessels_by_month_port.png"),vessels_by_month_port_plot,w=8,h=6)
 ggsave(filename = paste0(fp_plots,"traps_by_month_port.png"),traps_by_month_port_plot,w=8,h=6)
