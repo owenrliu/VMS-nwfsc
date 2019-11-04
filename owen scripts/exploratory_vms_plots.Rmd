@@ -248,16 +248,18 @@ Next we turn to the calculation of catch-per-unit-effort, or CPUE, which describ
 We can use this same data to compare how things like CPUE, trip length, and total landings vary as a function of vessel size. For now, we split vessels into "Large" (>40 ft long) and Small vessels.
 
 ```{r define vessel size}
-fishtix %>% 
-  select(drvid,FINAL_LENGTH) %>% 
-  distinct() %>% 
-  ggplot(aes(FINAL_LENGTH))+
-  geom_histogram(fill="blue",alpha=0.5,bins=25)+
-  labs(x="Vessel Length",y="Number of Vessels",title="Distribution of Vessel Lengths")+
-  geom_vline(xintercept = 40,linetype=2,color='black')
 
 # Define large vs. small vessels
 vms_fishtix_join %<>% filter(!is.na(FINAL_LENGTH)) %>% mutate(is_large=FINAL_LENGTH>=40)
+vms_fishtix_join %>% 
+  select(drvid,has_vms,FINAL_LENGTH) %>% 
+  distinct() %>% 
+  ggplot(aes(FINAL_LENGTH,fill=factor(has_vms)))+
+  geom_histogram(alpha=0.5,bins=25)+
+  scale_fill_manual(values=c('blue','darkgreen'),name="VMS-equipped?",labels=c("No","Yes"))+
+  labs(x="Vessel Length",y="Number of Vessels",title="Distribution of Vessel Lengths")+
+  geom_vline(xintercept = 40,linetype=2,color='black')
+
 ```
 ## Number of Vessels
 
@@ -299,6 +301,49 @@ nvessels_by_size_month %>%
 ```
 
 An interesting thing to notice here is how the proportion of the fleet comprised of large boats is smallest at the beginning of each crab season (November and December). This may indicate that a lot of small boats participate in the fishery for just a couple of months before dropping out, while the large boats are more consistent participants in the fishery throughout the season.
+
+We can break the size categories down further, and create a monthly index of relative VMS represent in each size category in each year/month. This index will be useful later to extrapolate the total number of traps from the VMS-only observations. For now, the categories are:
+
+* smaller than 30ft
+* 30 to 40 feet
+* 40 to 50 feet
+* greater than 50 feet
+
+```{r monthly repr index}
+monthly_vms_representation_index <- vms_fishtix_join %>% 
+  mutate(has_vms=has_vms==1) %>% 
+  mutate(vessel_length_cat=case_when(
+    FINAL_LENGTH > 0 & FINAL_LENGTH<30 ~ 1,
+    FINAL_LENGTH >= 30 & FINAL_LENGTH<40 ~ 2,
+    FINAL_LENGTH >= 40 & FINAL_LENGTH<50 ~ 3,
+    FINAL_LENGTH >=50~ 4
+  )) %>% 
+  group_by(year,month,vessel_length_cat,has_vms) %>% 
+  summarise(nvessels=n_distinct(drvid)) %>% 
+  ungroup() %>% 
+  group_by(year,month,vessel_length_cat) %>% 
+  mutate(tot_vessels=sum(nvessels)) %>%
+  ungroup() %>% 
+  filter(has_vms==1) %>% 
+  mutate(prop_vms=nvessels/tot_vessels) %>% 
+  mutate(day=1) %>% 
+  unite(date,year,month,day,sep="-",remove = FALSE) %>% 
+  mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles"))
+
+# Distribution of number of vessels observed per month in each category 
+monthly_vms_representation_index %>% 
+  ggplot(aes(nvessels,fill=factor(vessel_length_cat)))+
+  geom_histogram(bins=25,position = 'dodge')+
+  scale_fill_discrete(name="Vessel Length Category")+
+  labs(x="Number of Vessels Recording Tickets",y="Number of Year-Mon combinations")
+# Distribution of proportional representation index
+monthly_vms_representation_index %>% 
+  ggplot(aes(prop_vms,fill=factor(vessel_length_cat)))+
+  geom_histogram(bins=10,position = 'dodge')+
+  scale_fill_discrete(name="Proportional Representation of VMS vessels")+
+  labs(x="Number of Vessels Recording Tickets",y="Number of Year-Mon combinations")
+saveRDS(monthly_vms_representation_index,file = paste0(fp,"monthly_vms_representation_index.rds"))
+```
 
 ## Landings
 

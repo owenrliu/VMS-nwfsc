@@ -1,0 +1,124 @@
+---
+title: "Matching VMS Data to Bathymetry"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+10/30/19: Checking why there are so many VMS points without a matching 5km grid cell
+
+```{r libs,message=FALSE,warning=FALSE}
+library(tidyverse)
+library(sf)
+library(here)
+library(fasterize)
+library(raster)
+library(rnaturalearth)
+library(knitr)
+library(ggsci)
+library(extrafont)
+library(marmap)
+
+# ggplot theme
+plot_theme <-   theme_minimal()+
+  theme(text=element_text(family="Gill Sans MT",size=12,color="black"),
+        legend.text = element_text(size=14),
+        axis.title=element_text(family="sans",size=14,color="black"),
+        axis.text=element_text(family="sans",size=8,color="black"),
+        panel.grid.major = element_line(color="gray50",linetype=3))
+theme_set(plot_theme)
+
+```
+
+
+## Import Files
+
+```{r}
+# load RData
+fp <- "C:/Users/Owen.Liu/Documents/NWFSC Research/Dungeness Fleet Dynamics/VMS DATA CONFIDENTIAL/Processed Data/VMS/"
+load(file=paste0(fp,"VMS_2009_2018_clean.RData"))
+
+vms_sf<-readRDS(file=paste0(fp,"VMS_int_reg_w_grid.rds"))
+
+# 5x5 grid shapefile
+# grd <- read_sf(here::here("Input_Data","5x5 Grid","five_km_grid_polys_geo.shp"))
+grd <- read_sf(here::here("Input_Data","5x5 Grid","regions_master_final_lamb.shp"))
+names(grd)
+
+# coastline
+coaststates <- ne_states(country='United States of America',returnclass = 'sf') %>% 
+  filter(name %in% c('California','Oregon','Washington')) %>% 
+  st_transform(st_crs(vms_sf))
+
+```
+
+## Check Depth
+
+One issue may be just that the VMS points that don't match are on land; if so, they should have positive values when matched to a bathymetry layer. Let's add depth.
+
+```{r}
+# Bathymetry layer
+bathy <- readGEBCO.bathy(file="C:/Users/Owen.Liu/Documents/NWFSC Research/Dungeness Fleet Dynamics/GEBCO Grid/GEBCO_2019_-132.0_50.0_-115.0_29.0.nc")
+
+# match depth (takes awhile to do the join)
+vms_pts <- vms_sf %>% st_transform(4326) %>% st_coordinates()
+depths <- vms_pts %>% 
+    get.depth(bathy,.,locator=FALSE)
+depths <- depths %>% as_tibble() %>% mutate(depth_m=depth*0.3048)
+
+# join depth data
+vms_sf <- vms_sf %>% bind_cols(dplyr::select(depths,lon,lat,depth_m))
+
+# add binary indicator as to whether or not an observations has grid data
+vms_sf <- vms_sf %>%
+  mutate(has_grid=!is.na(GRID5KM_ID))
+
+vms_sf %>% 
+  ggplot(aes(depth_m,..density..,fill=has_grid))+
+  geom_density(alpha=0.7)+
+  coord_cartesian(xlim=c(-100,100))+
+  geom_vline(xintercept=0)+
+  labs(x="Depth (m)",title="Depth Distribution of VMS points")+
+  scale_fill_npg(name="Has 5KM Grid")
+```
+
+So it seems like a lot of the points that weren't assigned a grid cell are likely on land (positive bathymetry). We can zoom in on a couple of places and see if this is true.
+
+## Map Key Areas
+
+```{r zoom}
+# Monterey
+monterey <- vms_sf %>% 
+  filter(lat<37,lat>36.3,lon< -121.4,lon>-122.5)
+bbox_monterey <- st_bbox(monterey)
+monterey_points <- ggplot()+
+  geom_sf(data=coaststates)+
+  geom_sf(data=monterey,aes(col=has_grid,fill=has_grid),size=0.5,alpha=0.5)+
+  scale_color_npg(name="Has 5km Grid\nassigned")+
+  scale_fill_npg(name="Has 5km Grid\nassigned")+
+  xlim(bbox_monterey[1],bbox_monterey[3])+
+  ylim(bbox_monterey[2],bbox_monterey[4])+
+  labs(title="Monterey VMS Points")
+
+# Eureka
+eureka <- vms_sf %>% 
+  filter(lat<41.3,lat>40.5,lon< -123.5,lon>-124.5)
+bbox_eureka <- st_bbox(eureka)
+eureka_points <- ggplot()+
+  geom_sf(data=coaststates)+
+  geom_sf(data=eureka,aes(col=has_grid,fill=has_grid),size=0.5,alpha=0.5)+
+  scale_color_npg(name="Has 5km Grid\nassigned")+
+  scale_fill_npg(name="Has 5km Grid\nassigned")+
+  xlim(bbox_eureka[1],bbox_eureka[3])+
+  ylim(bbox_eureka[2],bbox_eureka[4])+
+  labs(title="Eureka VMS Points")
+monterey_points
+eureka_points
+```
+
+

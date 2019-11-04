@@ -29,7 +29,7 @@ library(knitr)
 
 ```{r}
 # clean, interpolated vms data
-vms <- read_csv("C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/VMS/VMS_Outputs_wTARGET_10d_lookback_2009_final_cleaned_interpolated_regular.csv",col_types='dcTddccddTDdccccd')
+vms <- read_csv("C:/Users/Owen.Liu/Documents/NWFSC Research/Dungeness Fleet Dynamics/VMS DATA CONFIDENTIAL/Processed Data/VMS/VMS_Outputs_wTARGET_10d_lookback_2009_final_cleaned_interpolated_regular.csv",col_types='dcTddccddTDdccccd')
 
 # 5x5 grid shapefile
 # grd <- read_sf(here::here("Input_Data","5x5 Grid","five_km_grid_polys_geo.shp"))
@@ -127,7 +127,7 @@ Check to see how fast (or slow) it is to match all of the VMS points from all ye
 rm(list=setdiff(ls(),'grd'))
 
 # load RData
-fp <- "C:/Users/owenr/Documents/postdocs/NOAA NRC/NWFSC work/VMS DATA CONFIDENTIAL/Processed Data/VMS/"
+fp <- "C:/Users/Owen.Liu/Documents/NWFSC Research/Dungeness Fleet Dynamics/VMS DATA CONFIDENTIAL/Processed Data/VMS/"
 load(file=paste0(fp,"VMS_2009_2018_clean.RData"))
 ```
 
@@ -154,6 +154,17 @@ proc.time()-pt
 ```
 
 The join took ~15 minutes.
+
+### Add BIAs (10/15/19)
+
+We can add whale BIAs into the data as well. They have previously been matched to the 5km grid, courtesy of Sam Woodman.
+
+```{r add BIAs}
+BIA <- read_csv(here('Input_Data','Grid5km_BIA_overlap.csv'))
+BIA %<>% select(GRID5KM_ID,BIA_mn,BIA_bm)
+
+vms_all_grd_match %<>% left_join(BIA,by='GRID5KM_ID')
+```
 
 ### Save and Write
 

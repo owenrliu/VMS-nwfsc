@@ -15,7 +15,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 Building on other analyses attempting to quantify spatial effort in the Dungeness fishery, and its relationship to whale entanglement risk, we propose here a new way to estimate the density of vertical lines in a given area in the Dungeness crab fishery on the U.S. West Coast.
 
-The precision and utility of any estimate of spatiotemporal fishing effort is dependent upon the underlying data available in the system. The primary source used in the below analyses are Vessel Monitoring System (VMS) data---approximate hourly geolocations for a subset of fishing vessels on the U.S. west coast from 2009-2018. These data have the advantage of being spatially explicit, but the data do not include information on the number of traps fished or the "soak time" (time in the water between check by the fisher) of each trap. Hence, we will have to estimate density of traps---and therefore vertical lines---through different means.
+The precision and utility of any estimate of spatiotemporal fishing effort is dependent upon the underlying data available in the system. The primary source used in the below analyses are Vessel Monitoring System (VMS) data---approximate hourly geolocations for a subset of fishing vessels on the U.S. West Coast from 2009-2018. These data have the advantage of being spatially explicit, but the data do not include information on the number of traps fished or the "soak time" (time in the water between check by the fisher) of each trap. Hence, we will have to estimate density of traps---and therefore vertical lines---through different means.
 
 # Proposed Estimation
 
@@ -25,31 +25,32 @@ Currently, the VMS data are organized by trip and have been joined to PacFin fis
 
 The cleaning of the data has been done elsewhere, but for the purposes of the following plots, the important points are:
 
-* Raw VMS data were cleaned and checked for errors, and then linearly interpolated and regularized. We linearly interpolated between recorded VMS points to obtain a relative measure of speed and distance traveled during each trip, then regularized those data, choosing points along the paths such that we have a VMS record for each vessel at more regular time intervals. This means that we do not have extremely fine-scale records of when a vessel, e.g., slowed down, started fishing, or began transiting back to port.
+* Raw VMS data were cleaned and checked for errors, and then linearly interpolated and regularized. We linearly interpolated between recorded VMS points to obtain a relative measure of speed and distance traveled during each trip, then regularized those data, choosing points along the paths such that we have a VMS record for each vessel at more regular (hourly) time intervals. This means that we do NOT have extremely fine-scale records of when a vessel, e.g., slowed down, started fishing, or began transiting back to port.
 * A fishing "trip" (the unit of many of the analyses below) is defined as the collection of VMS records preceding a landed, recorded PacFIN fish ticket. This means that one "trip" could involve multiple returns to port by a vessel across multiple days, as long as there is no ticket submitted within that time frame.
 * In data processing, VMS records were assigned to fish tickets using two criteria. First, for each ticket, we looked backwards to see when the previous ticket had been submitted, and assigned all VMS records after the previous ticket to the current ticket. Second, for those vessels with long periods between submitted tickets, we enforced a 10 day "lookback window", such that the maximum number of calendar days of VMS records that could be associated with a single ticket is 10.
 * We are focused here on fishing trips for Dungeness crab, but some vessels can participate in multiple fisheries. In data processing, if multiple tickets were submitted by a vessel on the same day, we denoted the primary target species for that trip as the species with the most landed pounds across all tickets. However, we also marked those trips so we can investigate any differences between single and multispecies fishing trips.
 
 ## Estimating Vertical Line Density
 
-The goal of the analysis is to get an idea of the density of crab pot lines in the water in any given place and time during the Dungeness crab season. To do this, we will take the relatively simple approach of multiplying the distance traveled by each vessel during a fishing trip by the expected number of crab pots deployed along each mile of that trip.
+The goal of the analysis is to get an idea of the density of crab pot lines in the water in any given place and time during the Dungeness crab season. To do this, we will take the relatively simple approach of multiplying the distance traveled by each vessel during a fishing trip by the expected number of crab pots deployed along each mile of that trip, and then distribute those traps randomly along the vessel's trajectory.
 
 Because we do not currently have string-level data of how many traps are fished by individual fishers, we must estimate the number of traps. According to previous studies (NMFS 2005), common spacing of Dungeness crab traps along a contour line is 10-25 pots per mile, with an average of 15. Soak times (unattended time spent in the water) of these traps varies from less than 1 day to 7 days or more. Moreover, both the number of pots fished and the soak time can vary throughout the crab season, depending on prevailing conditions and market conditions. Nevertheless, these previous estimates can serve as bounds on our analysis and provide a basis for sensitivity analysis of our results.
 
-We will be estimating the number of traps fished within the confines of each individual Dungeness crab fishing trip (with "trip" defined as above). We will try two different estimation methods and compare them. For both methods, we first calculate, from VMS data, the total distance traveled by a vessel during a fishing trip. Then, for the first method, we assign a total number of traps based on that distance travel and place them randomly within the footprint of the fishing trip. In the second method, we place the traps evenly along straight segments between actual VMS pings.
+We will be estimating the number of traps fished within the confines of each individual Dungeness crab fishing trip (with "trip" defined as above). In the example below, we try four different estimation methods and compare them visually. Each method involves a slightly different way of spatially distributing crab pots. For the first method, we assign a total number of traps based on the distance traveled by each vessel over the course of the trip, and then place the trips randomly within the overall footprint of the fishing trip. In the second method, we place the traps evenly along straight segments between actual VMS pings. The third and fourth methods fall somewhere between methods 1 and 2, by assigning traps along the general course of the VMS tracks, but with randomness or "jitter" applied such that not all the traps are directly placed in straight lines. 
 
 From a technical standpoint, we will:
 
 1. Remove the first and last VMS segment from each fishing trip, which are presumably spent mostly transiting to and from a port.
-2. Calculate the remaining distance traveled in each VMS segment within each trip
+2. 
 3. For the first method:
-  i) Calculate a convex hull around all of the remaining VMS points for that trip
-  ii) Calculate the number of traps to deploy based on the distance traveled during the trip and a number of pots per mile
-  iii) Randomly place those traps within the convex hull of the fishing trip
+  i) Calculate the remaining distance traveled in each VMS segment within each trip
+  ii) Calculate a convex hull around all of the remaining VMS points for that trip
+  iii) Calculate the number of traps to deploy based on the distance traveled during the trip and a number of pots per mile
+  iv) Randomly place those traps within the convex hull of the fishing trip
 4. For the second method:
-  i) Calculate the number of traps to deploy based on the distance traveled during the trip and a number of pots per mile
-  ii) Place the traps in even segments along straight lines between VMS points
-5. For both methods, calculate and display distribution and density of assigned crab pots
+  i) Place the traps in even segments along straight lines between VMS points, at a rate of 15 traps/linear mile (although this could be changed later)
+5. For the third method, create buffer or padding around each straight line, then assign the traps randomly within that footprint.
+6. Finally, for the fourth method, assign traps in segments along straight lines as in method 2, but then add a uniform random displacement for each trap in both X and Y directions.
 
 To see this visually, we start with an example from a single fishing trip.
 
@@ -65,7 +66,7 @@ library(sf)
 library(geosphere)
 library(magrittr)
 library(rnaturalearth)
-library(spbabel)
+library(marmap)
 
 # ggplot theme
 plot_theme <-   theme_minimal()+
@@ -112,21 +113,39 @@ trip1 <- vms_sf %>%
   ungroup() %>% 
   slice(100) %>% 
   unnest(cols = c(data)) %>% 
-  st_as_sf(crs=st_crs(vms_sf)) %>% 
-  st_transform(4326)
+  st_as_sf(crs=st_crs(vms_sf))
 
-bbox <- st_bbox(trip1)
+
+# create individual line segments
+# NOTE: This creates look-one-point-ahead line segments
+create_linesegs <- function(sf_df){
+  linesegs <- sf_df %>% 
+    mutate(pt=row_number()) %>% 
+    # create start and end points for each segment by duplicating rows (so that, e.g., the first segment will connect point 1 to 2, the second segment will connect point 2 to 3, etc.)
+    slice(1,rep(2:(n()-1),each=2),n()) %>% 
+    # line segment identifier, such that the segment for each VMS point is composed of its own point and the next point
+    mutate(seg=lag(pt,1)) %>% replace_na(list(seg=1)) %>% 
+    # build the lines
+    group_by(seg) %>% 
+    summarise() %>% 
+    filter(st_geometry_type(.) == "MULTIPOINT") %>% 
+    st_cast("LINESTRING") %>% 
+    ungroup()
+  return(linesegs)
+}
 
 # plot
-# sptable for drawing paths
-trip_tbl <- trip1 %>% 
-  spbabel::sptable()
+
+trip1_lines <- trip1 %>% 
+  create_linesegs()
+
+bbox <- st_bbox(trip1_lines)
 
 ggplot()+
-  geom_path(data=trip_tbl,aes(x_,y_),color="black")+
+  geom_sf(data=trip1_lines,color="black")+
   geom_sf(data=coaststates,color='gray50')+
   theme(axis.text.x = element_text(angle=45))+
-  coord_sf(xlim=c(bbox[1],bbox[3]),ylim=c(bbox[2],bbox[4]),crs=st_crs(coaststates))+
+  coord_sf(xlim=c(bbox[1],bbox[3]),ylim=c(bbox[2],bbox[4]))+
   labs(x="Longitude",y="Latitude",title="A DCRB Trip\nDec 02, 2010")
 ```
 
@@ -135,16 +154,13 @@ ggplot()+
 The first step in processing is to remove the first and last segments of the trip, as they are likely associated with transiting into and out of port.
 
 ```{r remove segs}
-trip1_trunc <- trip1 %>% slice(2:(n()-1))
-
-trip_trunc_tbl <- trip1_trunc %>% 
-  spbabel::sptable()
+trip1_trunc <- trip1_lines %>% slice(2:(n()-1))
 
 ggplot()+
-  geom_path(data=trip_trunc_tbl,aes(x_,y_),color="black")+
+  geom_sf(data=trip1_trunc,color="black")+
   geom_sf(data=coaststates,color='gray50')+
   theme(axis.text.x = element_text(angle=45))+
-  coord_sf(xlim=c(bbox[1],bbox[3]),ylim=c(bbox[2],bbox[4]),crs=st_crs(coaststates))+
+  coord_sf(xlim=c(bbox[1],bbox[3]),ylim=c(bbox[2],bbox[4]))+
   labs(x="Longitude",y="Latitude",title="A DCRB Trip\nDec 02, 2010\nFirst and Last Segments Removed")
 ```
 
@@ -153,18 +169,8 @@ ggplot()+
 For the next step, we have to calculate the distance traveled by the vessel between these points
 
 ```{r calc dist}
-trip1_coords <- trip1_trunc %>% 
-  st_coordinates() %>% 
-  as_tibble %>% 
-  set_names(c('lon','lat'))
-
-# Join trip identifiers from fish ticket data and then calculate distances along the path of each trip
-trip1_dists <- trip1_coords %>% 
-  mutate(last_x=lag(lon,1),last_y=lag(lat,1)) %>% 
-  mutate(distance=distHaversine(cbind(lon,lat),cbind(last_x,last_y),r = 3963.19))
-
-# summarize each trip, adding up total distance traveled
-trip1_tot_dist <- sum(trip1_dists$distance,na.rm=T)
+# summarize the trip, adding up total distance traveled
+trip1_tot_dist <- sum(st_length(trip1_trunc)) %>% units::set_units(mi) %>% as.numeric()
 ```
 
 On this trip, based on our interpolated VMS data and *excluding* the first and last legs of the trip, this vessel traveled `r round(trip1_tot_dist,2)` miles. If we adopt the numbers from above that estimate a mean of 15 crab pots per linear mile, then our estimate would be that this trip involved interacting with ~`r round(trip1_tot_dist*15)` traps.
@@ -186,7 +192,7 @@ ggplot()+
   geom_sf(data=trip1_traps_opt1,col='black',size=0.5)+
   geom_sf(data=coaststates,color='gray50')+
   theme(axis.text.x = element_text(angle=45))+
-  coord_sf(xlim=c(bbox[1],bbox[3]),ylim=c(bbox[2],bbox[4]),crs=st_crs(coaststates))+
+  coord_sf(xlim=c(bbox[1],bbox[3]),ylim=c(bbox[2],bbox[4]))+
   labs(x="Longitude",y="Latitude",title="A DCRB Trip\nDec 02, 2010\nRandom Trap Placement")
 ```
 
@@ -195,18 +201,13 @@ ggplot()+
 For the second option, we retain the line segments from the vessel's trajectory, and assign our `r round(trip1_tot_dist*15)` traps along those lines.
 
 ```{r}
-# formula to calculate the number of traps along a given line segment, assuming 15 traps/mile
-calc_ntraps <- function(seg_length){
-  floor(seg_length*15)
-}
-
 # create segments
-trip1_lines <- trip1_trunc %>% 
-  summarise(do_union=FALSE) %>% 
-  st_cast("LINESTRING") %>% 
+trip1_segmentize <- trip1_trunc %>% 
+  ungroup() %>% 
+  summarise(do_union=TRUE) %>% 
   st_segmentize(units::set_units(1/15,miles))
 
-trip1_traps_opt2 <- trip1_lines[[1]] %>% st_cast("POINT")
+trip1_traps_opt2 <- trip1_segmentize %>% st_cast("POINT")
 
 ggplot()+
   geom_sf(data=trip1_traps_opt2,col='blue',size=0.3)+
@@ -228,7 +229,7 @@ ggplot()+
                      guide=guide_legend(override.aes = list(linetype=c('blank','blank'))))+
   scale_fill_manual(name="",values=cols)+
   theme(axis.text.x = element_text(angle=45))+
-  coord_sf(xlim=c(bbox[1],bbox[3]),ylim=c(bbox[2],bbox[4]),crs=st_crs(coaststates))+
+  coord_sf(xlim=c(bbox[1],bbox[3]),ylim=c(bbox[2],bbox[4]))+
   labs(x="Longitude",y="Latitude",title="Random versus Linear Trap Placement")
 ```
 
@@ -241,9 +242,10 @@ As an intermediate option, we can assign traps randomly, but place them within a
 buffer_size <- 1000
 
 # buffer lines
-trip1_buffer <- trip1_lines %>% 
+trip1_buffer <- trip1_segmentize %>% 
   st_transform(st_crs(vms_sf)) %>% 
-  st_buffer(buffer_size)
+  st_buffer(buffer_size) %>% 
+  st_union()
 
 # assign points
 trip1_traps_opt3 <- trip1_buffer %>% st_sample(num_traps)
@@ -260,13 +262,11 @@ ggplot()+
 Buffering can be computationally expensive when dealing with millions of observations, especially for trips that have crossing lines. Another option is to retain the line segmentation, but add noise ("jitter") to the data. Let's see how it looks. This will be the same as Option 2, but with some noise added in.
 
 ```{r jitter traps}
-# create segments
-trip1_jitter <- trip1_trunc %>% 
-  summarise(do_union=FALSE) %>% 
-  st_cast("LINESTRING") %>% 
-  st_segmentize(units::set_units(1/15,miles))
-
-trip1_traps_opt4 <- trip1_lines[[1]] %>% st_cast("POINT") %>% st_jitter(amount=0.01)
+# create segments and jitter
+trip1_traps_opt4 <- trip1_trunc %>%
+  st_segmentize(units::set_units(1/15,miles)) %>% 
+  st_cast("POINT") %>% 
+  st_jitter(amount=1000)
 
 ggplot()+
   geom_sf(data=trip1_traps_opt4,col='blue',size=0.3)+
@@ -278,34 +278,70 @@ We will go with this for now. Can we apply this method to a larger set of trips?
 
 # Assign Trap Locations to all Dungeness Trips
 
-We'll apply Option 3 above to all trips in the data.
+We'll apply Option 4 above (segments plus jitter) to all trips in the data.
+
+## Speed, Depth, and Total Number of Traps Filters
+
+We need to apply a few course filters to the data in order to get a more realistic estimates of lines. Three important filters are vessel speed (because vessels can't be actively checking traps if they are going too fast), depth (very little crab fishing is done in depths >100m), and total number of traps. For now, we assume the following values and procedures (which could be changed later):
+
+*  Remove vessel trip segments, and their associated simulated traps, for segments with an average speed of >8.5 kts (= 4.372 m/s)
+*  Remove any traps that are placed in water greater than 100m deep
+*  After the previous filters, if the number of simulated traps per trip is still greater than 500, sub-sample (randomly) 500 traps for that trip
+
+```{r import depth}
+# import bathymetry layer (GEBCO 15 arc-second resolution)
+# bounding box for the layer (have to translate to lat/lon for bathymetry layer)
+bathy <- readGEBCO.bathy(file="C:/Users/Owen.Liu/Documents/NWFSC Research/Dungeness Fleet Dynamics/GEBCO Grid/GEBCO_2019_-132.3021_50.6549_-116.6354_31.2799.nc")
+```
 
 ## Spatially Assign Traps
 
-```{r calc traps}
+```{r calc traps,message=F,warning=F}
 # Function to apply the steps above
 # the function takes a set of trip coordinates, a jitter amount in meters, and a number of traps/mile as input and returns a list of trap locations as output
 
-assign_traps <- function(trip,ntraps_per_mi=15,jitter=1000) {
+assign_traps <- function(trip,ntraps_per_mi=15,jitter_amount=1000) {
   
-  out <- trip %>% 
+  #convert to latlon for depth comparison
+  
+  linesegs <- trip %>% 
     # make sure points are in time order
     arrange(westcoastdate) %>% 
-    # remove first and last segments
-    slice(2:(n()-1)) %>% 
     # make lines
-    summarise(do_union=FALSE) %>%
-    st_cast("LINESTRING") %>%
+    create_linesegs() %>% 
+    # remove first and last segments
+    slice(2:(n()-1))
+  
+  st_geometry(trip) <- NULL
+  
+  out <- trip %>% 
+    # identifier for joining segments
+    mutate(seg=row_number()) %>% 
+    # join line segments
+    right_join(linesegs,by='seg') %>% 
+    # remove lines where estimated speed is too high  
+    # filter(avg_speed_recalc<4.4) %>% 
     # segment lines into number of traps
+    st_as_sf() %>% 
     st_segmentize(units::set_units(1/ntraps_per_mi,miles)) %>% 
     st_cast("POINT") %>% 
     # jitter the traps by a specified number of meters (i.e. draw a random displacement between -jitter and +jitter from a uniform distribution)
-    st_jitter(amount=1000)
-
+    st_jitter(amount=jitter_amount) %>% 
+    # filter by depth
+    st_transform(4326) %>% st_coordinates() %>% 
+    get.depth(bathy,.,locator=FALSE) %>% 
+    mutate(trap_number=row_number()) %>% 
+    filter(depth>-101,depth<0) %>% 
+    # sample 500 or all the traps, whichever is smaller
+    sample_n(min(500,nrow(.))) %>% 
+    st_as_sf(coords=c('lon','lat'))
+  
+  print(paste("Trip number",unique(trip$tripnum),"done."))
+    
   return(out)
 }
 
-# Check with 5 example trips
+# Check with 100 example trips
 p <- proc.time()
 trip_test <- vms_sf %>% 
   filter(TARGET_max=="DCRB",year(westcoastdate)==2010,month(westcoastdate)==12) %>% 
@@ -319,16 +355,20 @@ p <- proc.time()
 test2 <- trip_test %>% mutate(traps=purrr::map(data,assign_traps))
 proc.time()-p
 
+testplot <- test2$traps[[61]]
+st_crs(testplot) <- 4326
 ggplot()+
-  geom_sf(data=trip_test$traps,col='black',size=0.3)+
+  geom_sf(data=coaststates)+
+  geom_sf(data=testplot,col='black',size=0.3)+
+  coord_sf(xlim=c(st_bbox(testplot)[1],st_bbox(testplot)[3]),ylim=c(st_bbox(testplot)[2],st_bbox(testplot)[4]))+
   labs(x="Longitude",y="Latitude",title="Test of All-in-One Function")
 ```
 
 ## Apply to all Trips
 
-This will take some processing time. It takes about a half second per trip, and if there are 50,000 trips...
+This will take some processing time. It takes about a 0.8s per trip, and if there are 50,000 trips...
 
-```{r assign traps}
+```{r assign traps, eval=FALSE}
 p <- proc.time()
 
 nested_trips <- vms_sf %>% 
@@ -342,6 +382,187 @@ simulated_traps <- nested_trips %>%
   mutate(traps=purrr::map(data,assign_traps))
 
 proc.time()-p
+
+saveRDS(simulated_traps,file=paste0(fp,"sim_traps_speed_depth_filters.rds"))
+
+```
+
+# Visualize Results
+
+We have now simulated traps for every Dungeness crab trip for which we have VMS data. We now turn to the task of trying to summarize the numbers of traps across time and spatial domains. This will help us to validate whether the outputs from our simulation make any sense.
+
+```{r}
+# Load if not already loaded
+simulated_traps <- readRDS(file=paste0(fp,"sim_traps_speed_depth_filters.rds")) %>% ungroup()
+
+# traps locations only (discard VMS data for now), attached to fish ticket data
+traplocs <- simulated_traps %>% select(Rec_ID,traps) %>% 
+  left_join(fishtix_matched_all,by="Rec_ID") %>% 
+  select(Rec_ID,date,year,month,pacfin_port_code,port_group_code,agency_code,drvid,FINAL_LENGTH,traps) %>% 
+  distinct(Rec_ID,.keep_all = T) %>% 
+  # count number of traps associated with each trip
+  mutate(ntraps=purrr::map_int(traps,nrow))
+```
+
+## Weighting Factors
+
+In order to produce overall counts for numbers of traps in the entire fishery (not just traps fished by VMS vessels), we need to account for two different weighting factors. First, we need to correct for the proportional representation of VMS vessels, relative to the overall fleet. We do this by utilizing the proportional representation index calculated in the `exploratory_vms_plots.Rmd` script, which calculates weighting factors by vessel size class (<30ft, 30-40ft, 40-50ft, >50ft).
+
+### Account for Proportional Representation of VMS vessels
+
+```{r proportional repr}
+prop_vms_index <- readRDS(paste0(fp,"monthly_vms_representation_index.rds")) %>% 
+  select(year,month,vessel_length_cat,prop_vms)
+```
+
+### Downscale Traps by Vessel
+
+We need to make sure we are not double-counting traps by vessel. In other words, if we are going to sum traps across months and trips and when a vessel makes more than one trip per month, we need to down-weight the number of traps per trip to account for that double-counting. We will do this simply by calculating the number of trips per vessel per month in the data, and then using that number as the weighting factor.
+
+```{r traps by vessel month}
+vessel_month_ntrap_weights <- traplocs %>% 
+  ungroup() %>% 
+  select(Rec_ID,date,agency_code,port_group_code,drvid,ntraps) %>% 
+  mutate(year=year(date),month=month(date)) %>% 
+  group_by(drvid,year,month) %>%
+  # count number of trips per vessel per month to use as weighting factor
+  mutate(ntrips_month=n_distinct(Rec_ID))
+```
+
+### Overall Weighting Factor
+
+The overall weighting factor $W$, combining the two weights above, will be at the scale of vessel/year/month, and is calculated for year $y$, month $m$, size class $s$, and vessel $i$ as
+
+$$W_{y,m,s} = \frac{1}{PropVMS_{y,m,s}}*\frac{1}{N_{i,y,m}}$$
+
+Where $W$ is the weighting factor, $PropVMS$ is the proportion of vessels covered by VMS data, and $N$ is the total number of trips taken by vessel $i$ in year $y$ and month $m$
+
+```{r produce overall weights}
+vessel_month_allweights <- traplocs %>% 
+# add the monthly weighting factor to the trap locations
+  mutate(vessel_length_cat=case_when(
+    FINAL_LENGTH > 0 & FINAL_LENGTH<30 ~ 1,
+    FINAL_LENGTH >= 30 & FINAL_LENGTH<40 ~ 2,
+    FINAL_LENGTH >= 40 & FINAL_LENGTH<50 ~ 3,
+    FINAL_LENGTH >=50~ 4
+  )) %>% 
+  rowwise() %>% 
+  mutate(month=which(month.name==month)) %>% 
+  left_join(prop_vms_index) %>% 
+  ungroup() %>% 
+  left_join(vessel_month_ntrap_weights) %>% 
+  # calculate overall weight
+  mutate(combined_weight=(1/prop_vms)*(1/ntrips_month)) %>% 
+  select(Rec_ID,date,year,month,agency_code,port_group_code,drvid,ntraps,vessel_length_cat,prop_vms,ntrips_month,combined_weight)
+```
+
+
+```{r save weighting factors}
+saveRDS(vessel_month_ntrap_weights,file=paste0(fp,"vessel_month_trap_weights.rds"))
+saveRDS(vessel_month_allweights,file=paste0(fp,"vessel_month_all_weights.rds"))
+```
+
+## Traps by Vessel, Month, and Ports
+
+First we can look at simple metrics: how many traps are estimated to be fished per trip by each vessel, by month?
+
+```{r traps by vessel}
+mean_traps_per_trip <- traplocs %>% 
+  select(date,agency_code,port_group_code,drvid,ntraps) %>% 
+  mutate(year=year(date),month=month(date)) %>% 
+  group_by(year,month,drvid,agency_code,port_group_code) %>% 
+  # mean number of traps per trip per vessel per month
+  summarise(traps_per_trip=mean(ntraps)) %>% 
+  ungroup()
+
+traps_per_trip_plot <- mean_traps_per_trip %>% 
+  group_by(year,month) %>% 
+  summarise(mean_traps_per_trip=mean(traps_per_trip)) %>% 
+  mutate(day=1) %>% 
+  unite(date,year,month,day,sep="-",remove = FALSE) %>% 
+  mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles")) %>% 
+  ggplot(aes(date,mean_traps_per_trip))+
+  geom_line()+
+  scale_y_continuous(breaks=seq(0,500,by=100),labels=seq(0,500,by=100),limits=c(0,500))+
+  labs(x="Date",y="Mean Number of Traps per Dungeness Trip")
+```
+
+Total traps and vessels by month, calculated as mean traps per vessel-trip per month, summed over all the vessels recording trips in that month. Remember here that these numbers are only for VMS-equipped vessels.
+
+```{r}
+total_traps_by_month_state <- traps_per_trip %>% 
+  group_by(year,month,agency_code) %>% 
+  summarise(tot_traps=sum(traps_per_trip),nvessels=n_distinct(drvid)) %>% 
+  ungroup() %>% 
+  complete(year,month,agency_code,fill=list(tot_traps=0,nvessels=0)) %>% 
+  mutate(day=15) %>% 
+  unite(date,year,month,day,sep="-",remove = FALSE) %>% 
+  mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles"))
+
+vessels_by_month_plot <- total_traps_by_month_state %>% 
+  ggplot(aes(date,nvessels,fill=agency_code,col=agency_code))+
+  geom_bar(stat='identity',position='stack')+
+  scale_fill_nejm(name="State",labels=c("California","Oregon","Washington"))+
+  scale_color_nejm(name="State",labels=c("California","Oregon","Washington"))+
+  labs(x="Date",y="Number of Vessels",title="Total Number of VMS Vessels Recording Landings, by Month")+
+  scale_x_date(date_breaks= "6 months",date_labels="%b-%Y",expand=c(0,0))+
+  theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
+        panel.grid.minor = element_blank())
+
+sim_traps_by_month_plot<- total_traps_by_month_state %>% 
+  ggplot(aes(date,tot_traps/1000,color=agency_code,fill=agency_code))+
+  geom_bar(stat='identity',position='stack')+
+  scale_fill_nejm(name="State",labels=c("California","Oregon","Washington"))+
+  scale_color_nejm(name="State",labels=c("California","Oregon","Washington"))+
+  scale_x_date(date_breaks= "6 months",date_labels="%b-%Y",expand=c(0,0))+
+  labs(x="Date",y="Thousands of Traps",title="Total Number of Estimated Traps, by Month\nVMS Vessels Only")+
+  theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
+        panel.grid.minor = element_blank())
+
+#save
+fp_plots <- "C:/Users/Owen.Liu/Documents/NWFSC Research/Dungeness Fleet Dynamics/VMS DATA CONFIDENTIAL/Processed Data/owen processed/plots/"
+ggsave(filename = paste0(fp_plots,"vessels_by_month.png"),vessels_by_month_plot,w=8,h=6)
+ggsave(filename = paste0(fp_plots,"traps_by_month.png"),sim_traps_by_month_plot,w=8,h=6)
+
+```
+
+What about broken down by port group within states?
+
+```{r cali traps}
+total_traps_by_month_port <- traps_per_trip %>% 
+  group_by(year,month,agency_code,port_group_code) %>% 
+  summarise(tot_traps=sum(traps_per_trip),nvessels=n_distinct(drvid)) %>% 
+  mutate(day=15) %>% 
+  unite(date,year,month,day,sep="-",remove = FALSE) %>% 
+  mutate(date=as_date(date,format="%Y-%m-%d",tz="America/Los_Angeles")) %>% 
+  ungroup()
+
+vessels_by_month_port_plot <-total_traps_by_month_port %>% 
+  filter(agency_code=="C") %>% 
+  ggplot(aes(date,nvessels,fill=port_group_code,col=port_group_code))+
+  geom_bar(stat='identity')+
+  scale_fill_nejm(name="Port Group")+
+  scale_color_nejm(name="Port Group")+
+  facet_wrap(~port_group_code)+
+  labs(x="Date",y="Number of Vessels",title="Total Number of VMS Vessels Recording Landings, by Month\nCalifornia Ports")+
+  scale_x_date(date_breaks= "1 year",date_labels="%b-%Y",expand=c(0,0))+
+  theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
+        panel.grid.minor = element_blank())
+
+traps_by_month_port_plot <- total_traps_by_month_port %>% 
+  filter(agency_code=="C") %>% 
+  ggplot(aes(date,tot_traps/1000,fill=port_group_code,col=port_group_code))+
+  geom_bar(stat='identity')+
+  scale_fill_nejm(name="Port Group")+
+  scale_color_nejm(name="Port Group")+
+  facet_wrap(~port_group_code)+
+  labs(x="Date",y="Thousands of Traps",title="Total Number of Estimated Traps, by Month\nCalifornia Ports, VMS Vessels")+
+  scale_x_date(date_breaks= "1 year",date_labels="%b-%Y",expand=c(0,0))+
+  theme(axis.text.x.bottom = element_text(angle=90,vjust=+0.5,hjust=0),
+        panel.grid.minor = element_blank())
+
+ggsave(filename = paste0(fp_plots,"vessels_by_month_port.png"),vessels_by_month_port_plot,w=8,h=6)
+ggsave(filename = paste0(fp_plots,"traps_by_month_port.png"),traps_by_month_port_plot,w=8,h=6)
 ```
 
 
