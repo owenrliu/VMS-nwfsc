@@ -1,0 +1,135 @@
+---
+title: "Multiple Returns to Port"
+author: "Owen Liu"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r pkgs, include=FALSE,message=F,warning=FALSE}
+library(tidyverse)
+library(knitr)
+library(extrafont)
+library(ggsci)
+library(lubridate)
+library(sf)
+library(geosphere)
+library(magrittr)
+
+# ggplot theme
+plot_theme <-   theme_minimal()+
+  theme(text=element_text(family="Gill Sans MT",size=12,color="black"),
+        legend.text = element_text(size=14),
+        axis.title=element_text(family="sans",size=14,color="black"),
+        axis.text=element_text(family="sans",size=8,color="black"),
+        panel.grid.major = element_line(color="gray50",linetype=3))
+theme_set(plot_theme)
+```
+
+# Purpose
+
+The processing of VMS data and its organization by trip leads ot an interesting phenomenon whereby some trips seem to indicate in their VMS pings that there were multiple returns to port within the span of a single fish ticket. That is, there is some evidence that boats may be landing catch multiple times before an official ticket is counted.
+
+The purpose of this analysis is to obtain an idea of how prevalent this issue is.
+
+# Import Data
+
+```{r import data}
+# File path where data are held
+fp <- "C:/Users/Owen.Liu/Documents/NWFSC Research/Dungeness Fleet Dynamics/VMS DATA CONFIDENTIAL/Processed Data/VMS/"
+fp_tix <- "C:/Users/Owen.Liu/Documents/NWFSC Research/Dungeness Fleet Dynamics/VMS DATA CONFIDENTIAL/Processed Data/Fish tickets/"
+
+# Load Rdata files
+load(paste0(fp,"VMS_2009_2018_clean.RData"))
+```
+
+We will use the original (non-interpolated) VMS data to look at whether vessels are returning to port in the middle of "trips". In the original data processing, records were filtered out for between-trip stays in port. Specfically, we removed all but the *last* in-port record of the beginning of a fishing trip, and the *first* ping after the vessel's return to port (relative to times recorded on the fish tickets). That means we should have removed all of the "sitting in port in-between trips" data, but *not* the mid-trip returns to port, as long as the trip contained further VMS records outside port (and before submission of a fish ticket).
+
+# VMS Pings in Port
+
+```{r}
+vms_orig_clean %<>% mutate(is_in_port=!is.na(in_port))
+
+# From the original data, what proportion of all VMS records are 'in port'?
+vms_orig_clean %>% 
+  ggplot(aes(is_in_port,..count..))+
+  geom_bar()+
+  labs(x="The vessel is in port",y="Number of VMS records")
+```
+
+About one third of all VMS records are recorded in port, even with the filtered data. This implies that vessels are returning to port for substantial intervals in between submission of fish tickets.
+
+# Define Trip Segments
+
+We want to count the instances of vessels' returns to port mid-trip. To do this, we split each fishing trip into segments, based on whether each ping is in port or not. If a ping is recorded as in port while the previous ping was not in port, assign "return". If a ping is recorded as out of port while the previous ping was in port, assign "depart". Then we can count the number of returns and leaves per fish ticket.
+
+```{r assign trip segments}
+vms_with_returns <- vms_orig_clean %>% 
+  filter(TARGET=="DCRB") %>% 
+  group_by(Rec_ID) %>% 
+  mutate(last_in_port=lag(is_in_port,1)) %>%
+  mutate(return_leave=case_when(
+    is_in_port & last_in_port ~ "port",
+    is_in_port & !last_in_port ~ "return",
+    !is_in_port & last_in_port ~ "depart",
+    !is_in_port & !last_in_port ~ "not in port"
+  )) %>% 
+  ungroup()
+
+# check with a sample trip
+x <- vms_with_returns %>% 
+  filter(Rec_ID==50072441)
+y <- vms_with_returns %>% 
+  filter(Rec_ID==50072881)
+```
+
+# Count Departures and Returns by Ticket
+
+Finally, we can count the number of separate departures and returns to port by vessels on each fish ticket. If there were no mid-trip returns, then each trip would only be associated with one "depart" and one "return"
+
+```{r count deparatures and returns}
+tix_num_returns <- vms_with_returns %>% 
+  group_by(Rec_ID) %>% 
+  summarise(n_departs=sum(return_leave=="depart",na.rm=T),n_returns=sum(return_leave=="return",na.rm=T)) %>% 
+  ungroup()
+
+# Visualize
+tix_num_returns %<>%
+  mutate(depart_cat=case_when(
+    n_departs==0 ~ "0",
+    n_departs==1 ~ "1",
+    n_departs==2 ~ "2",
+    n_departs==3 ~ "3",
+    n_departs==4 ~ "4",
+    n_departs >4 ~ "More than 4"
+  )) %>% 
+  mutate(return_cat=case_when(
+    n_returns==0 ~ "0",
+    n_returns==1 ~ "1",
+    n_returns==2 ~ "2",
+    n_returns==3 ~ "3",
+    n_returns==4 ~ "4",
+    n_returns >4 ~ "More than 4"
+  ))
+
+tix_num_returns %>% 
+  ggplot(aes(depart_cat,..count..))+
+  geom_bar(fill="seagreen")+
+  labs(x="Number of Unique Departures Within a Fishing Trip",y="Number of Fishing Trips")
+tix_num_returns %>% 
+  ggplot(aes(return_cat,..count..))+
+  geom_bar(fill="cadetblue")+
+  labs(x="Number of Unique Returns Within a Fishing Trip",y="Number of Fishing Trips")
+
+paste(sum(tix_num_returns$n_returns>1),"out of",nrow(tix_num_returns),"or",round(sum(tix_num_returns$n_returns>1)/nrow(tix_num_returns)*100),"percent of DCRB fishing trips were associated with more than 1 unique return to port.")
+```
+
+
+
+

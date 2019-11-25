@@ -336,6 +336,14 @@ monthly_vms_representation_index %>%
   geom_histogram(bins=25,position = 'dodge')+
   scale_fill_discrete(name="Vessel Length Category")+
   labs(x="Number of Vessels Recording Tickets",y="Number of Year-Mon combinations")
+
+# Line plot
+monthly_vms_representation_index %>% 
+  ggplot(aes(date,prop_vms,col=factor(vessel_length_cat)))+
+  geom_point()+
+  geom_line()+
+  labs(x="Date",y="Proportional VMS Representation",title="Proportional Representation of VMS-equipped vessels\nrelative to all vessels",color="Vessel Length Category")+
+  scale_color_npg()
 # Distribution of proportional representation index
 monthly_vms_representation_index %>% 
   ggplot(aes(prop_vms,fill=factor(vessel_length_cat)))+
