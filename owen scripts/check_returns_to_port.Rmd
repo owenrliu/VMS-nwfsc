@@ -21,6 +21,7 @@ library(lubridate)
 library(sf)
 library(geosphere)
 library(magrittr)
+library(rnaturalearth)
 
 # ggplot theme
 plot_theme <-   theme_minimal()+
@@ -81,12 +82,6 @@ vms_with_returns <- vms_orig_clean %>%
     !is_in_port & !last_in_port ~ "not in port"
   )) %>% 
   ungroup()
-
-# check with a sample trip
-x <- vms_with_returns %>% 
-  filter(Rec_ID==50072441)
-y <- vms_with_returns %>% 
-  filter(Rec_ID==50072881)
 ```
 
 # Count Departures and Returns by Ticket
@@ -95,7 +90,7 @@ Finally, we can count the number of separate departures and returns to port by v
 
 ```{r count deparatures and returns}
 tix_num_returns <- vms_with_returns %>% 
-  group_by(Rec_ID) %>% 
+  group_by(Rec_ID,Port_Of_Landing) %>% 
   summarise(n_departs=sum(return_leave=="depart",na.rm=T),n_returns=sum(return_leave=="return",na.rm=T)) %>% 
   ungroup()
 
@@ -121,15 +116,154 @@ tix_num_returns %<>%
 tix_num_returns %>% 
   ggplot(aes(depart_cat,..count..))+
   geom_bar(fill="seagreen")+
-  labs(x="Number of Unique Departures Within a Fishing Trip",y="Number of Fishing Trips")
+  labs(x="Number of Unique Departures Within a Fishing Trip",y="Number of Fishing Trips (Tickets)")
 tix_num_returns %>% 
   ggplot(aes(return_cat,..count..))+
   geom_bar(fill="cadetblue")+
-  labs(x="Number of Unique Returns Within a Fishing Trip",y="Number of Fishing Trips")
+  labs(x="Number of Unique Returns Within a Fishing Trip",y="Number of Fishing Trips (Tickets)")
 
 paste(sum(tix_num_returns$n_returns>1),"out of",nrow(tix_num_returns),"or",round(sum(tix_num_returns$n_returns>1)/nrow(tix_num_returns)*100),"percent of DCRB fishing trips were associated with more than 1 unique return to port.")
 ```
 
+# Count Returns to Port by Port
+
+We want to investigate how many different ports are visited, and also whether the number of returns to port varies by port of landing.
+
+```{r by port}
+num_ports_visited <- vms_with_returns %>% 
+  group_by(Rec_ID,Port_Of_Landing) %>% 
+  summarise(n_distinct_ports=n_distinct(in_port,na.rm=T)) %>% 
+  ungroup()
+
+num_ports_visited %>% 
+  ggplot(aes(n_distinct_ports))+
+  geom_bar(fill='seagreen')+
+  labs(x="Number of Distinct Ports Visited",y="Number of Tickets")
+
+# Distinct departures by point of landing
+tix_num_returns %>% 
+  ggplot(aes(depart_cat,..count..))+
+  geom_bar(fill="seagreen")+
+  facet_wrap(~Port_Of_Landing,scales='free')+
+  labs(x="Number of Unique Departures Within a Fishing Trip",y="Number of Fishing Trips")
+```
+
+# Directional Trips
+
+How many trips land at a different port from where they originate? We measure this by whether the FIRST port visited on a fishing trip is not the same as the LAST port visited.
+
+```{r directional}
+directional_trips <- vms_with_returns %>% 
+  group_by(Rec_ID) %>% 
+  filter(!is.na(in_port)) %>% 
+  slice(c(1,n())) %>% 
+  summarise(port_of_origin=in_port[1],port_of_return=in_port[2]) %>% 
+  mutate(is_directional=port_of_origin!=port_of_return) %>% 
+  ungroup()
+
+directional_trips %>% 
+  group_by(port_of_origin) %>% 
+  summarise(prop_directional=sum(is_directional)/n()) %>% 
+  ggplot(aes(reorder(port_of_origin,-prop_directional),prop_directional))+
+  geom_col()+
+  labs(x="Port of Origin",y="Proportion of Directional Trips")+
+  theme(axis.text.x = element_text(angle=90,vjust=0.5))
+
+# The above with only ports >10 trips
+
+directional_trips %>% 
+  group_by(port_of_origin) %>%
+  filter(n()>10) %>% 
+  summarise(prop_directional=sum(is_directional)/n()) %>% 
+  ggplot(aes(reorder(port_of_origin,-prop_directional),prop_directional))+
+  geom_col()+
+  labs(x="Port of Origin",y="Proportion of Directional Trips",title="Proportion of trips ending in a\ndifferent port from where they started")+
+  theme(axis.text.x = element_text(angle=90,vjust=0.5))
+  
+```
 
 
 
+# Map
+
+```{r map some}
+
+# check with a sample trip
+x <- vms_with_returns %>% 
+  filter(Rec_ID==50072441)
+y <- vms_with_returns %>% 
+  filter(Rec_ID==50072881)
+z <- vms_with_returns %>% 
+  filter(Rec_ID==47949001)
+
+x %<>% st_as_sf(coords=c('X_COORD','Y_COORD'),crs = "+proj=utm +north +zone=10 +ellps=WGS84") %>% 
+  mutate(return_leave=replace_na(return_leave,"port")) %>% 
+  mutate(return_leave=factor(return_leave,levels=c("port","depart","return","not in port")))
+
+# create line segments
+create_linesegs <- function(sf_df){
+  linesegs <- sf_df %>% 
+    mutate(pt=row_number()) %>% 
+    # create start and end points for each segment by duplicating rows (so that, e.g., the first segment will connect point 1 to 2, the second segment will connect point 2 to 3, etc.)
+    slice(1,rep(2:(n()-1),each=2),n()) %>% 
+    # line segment identifier, such that the segment for each VMS point is composed of its own point and the next point
+    mutate(seg=lag(pt,1)) %>% replace_na(list(seg=1)) %>% 
+    # build the lines
+    group_by(seg) %>% 
+    summarise() %>% 
+    filter(st_geometry_type(.) == "MULTIPOINT") %>% 
+    st_cast("LINESTRING") %>% 
+    ungroup()
+  return(linesegs)
+}
+
+x_lines <- x %>% create_linesegs()
+
+bg <- ne_states(country='United States of America',returnclass = 'sf') %>% 
+  filter(name %in% c('California','Oregon','Washington')) %>% 
+  st_transform(st_crs(x))
+
+bbox <- st_bbox(x)
+
+ggplot()+
+  geom_sf(data=bg,col=NA,fill='gray50')+
+  geom_sf(data=x_lines,col='black')+
+  geom_sf(data=x,aes(col=return_leave),key_glyph='rect')+
+  labs(title="Sample Trip with Multiple Returns",color="In Port")+
+  xlim(c(bbox[1],bbox[3]))+ylim(bbox[2],bbox[4])+
+  theme(axis.text.x = element_blank())
+
+# another
+y %<>% st_as_sf(coords=c('X_COORD','Y_COORD'),crs = "+proj=utm +north +zone=10 +ellps=WGS84") %>% 
+  mutate(return_leave=replace_na(return_leave,"port")) %>% 
+  mutate(return_leave=factor(return_leave,levels=c("port","depart","return","not in port")))
+
+y_lines <- y %>% create_linesegs()
+
+bbox <- st_bbox(y)
+
+ggplot()+
+  geom_sf(data=bg,col=NA,fill='gray50')+
+  geom_sf(data=y_lines,col='black')+
+  geom_sf(data=y,aes(col=return_leave),key_glyph='rect')+
+  labs(title="Sample Trip with Multiple Returns",color="In Port")+
+  xlim(c(bbox[1],bbox[3]))+ylim(bbox[2],bbox[4])+
+  theme(axis.text.x = element_blank())
+
+# a third
+z %<>% st_as_sf(coords=c('X_COORD','Y_COORD'),crs = "+proj=utm +north +zone=10 +ellps=WGS84") %>% 
+  mutate(return_leave=replace_na(return_leave,"port")) %>% 
+  mutate(return_leave=factor(return_leave,levels=c("port","depart","return","not in port")))
+
+z_lines <- z %>% create_linesegs()
+
+bbox <- st_bbox(z)
+
+ggplot()+
+  geom_sf(data=bg,col=NA,fill='gray50')+
+  geom_sf(data=z_lines,col='black')+
+  geom_sf(data=z,aes(col=return_leave),key_glyph='rect')+
+  labs(title="Sample Trip with Multiple Returns",color="In Port")+
+  xlim(c(bbox[1],bbox[3]))+ylim(bbox[2],bbox[4])+
+  theme(axis.text.x = element_blank())
+```
